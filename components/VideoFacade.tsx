@@ -21,7 +21,7 @@ export default function VideoFacade({ video }: { video: MachineVideo }) {
           <span>•</span>
           <span>Quality FAT Inspection</span>
         </div>
-        <h3 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "var(--ff-display)" }}>
+        <h3 className="text-xl sm:text-2xl font-bold text-[var(--ink)]" style={{ fontFamily: "var(--ff-display)" }}>
           {video.title}
         </h3>
         <p className="text-[0.92rem] text-[var(--ink-60)] leading-relaxed">

@@ -9,7 +9,7 @@ export default function MachineSeoSection({ seoData, machineName }: { seoData?: 
   if (!seoData) return null;
 
   return (
-    <div className="mt-14 space-y-12 border-t border-[var(--bg-line)] pt-12" data-reveal>
+    <div className="space-y-6 border-t border-[var(--bg-line)] pt-6 sm:space-y-8 sm:pt-8" data-reveal>
       {/* Title */}
       <div>
         <h2 className="text-[clamp(1.5rem,3vw,2.2rem)] font-bold leading-tight text-[var(--ink)]" style={{ fontFamily: "var(--ff-display)" }}>
