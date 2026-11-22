@@ -1,0 +1,26 @@
+node_modules/
+.next/
+*.node
+data.zip
+SEO-GEO-AEO-Skill-main.zip
+seo-audits/
+# data/ — CMS content (data/*.json) must be committed; was previously ignored
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+.env
+.env.local
+.env*.local
+*.log
+.DS_Store
+
+# About page video frames (served from Cloudinary)
+public/about-frames/
+
+# About page hero video — served from Cloudinary, not committed (large binary)
+public/about-hero.mp4
+/l.mp4
+
+# Ad-hoc dev/testing screenshots — not part of the app
+/shots/
+.agents/context/
+

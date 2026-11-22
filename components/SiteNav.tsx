@@ -1,0 +1,834 @@
+"use client";
+import { useEffect, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
+import { usePathname } from "@/i18n/navigation";
+import Image from "next/image";
+import TransitionLink from "@/components/TransitionLink";
+import ThemeToggle from "@/components/ThemeToggle";
+import RollingNavMenu from "@/components/RollingNavMenu";
+import type { NavCategory } from "@/lib/liveCatalogue";
+
+// Static logo — no cycling, brand name is stable and trustworthy for B2B
+const LOGO_WORDS = ["ASHAL INNOMECH"];
+
+/* Menu thumbnails come from each product's main photo in the admin panel
+   (live CMS, via the layout), so a photo change there updates the menu. */
+export default function SiteNav({ catalogue }: { catalogue: NavCategory[] }) {
+  const pathname = usePathname();
+  const t = useTranslations("nav");
+  const [scrolled,   setScrolled]   = useState(false);
+  const [navHidden,  setNavHidden]  = useState(false);
+  const lastScrollY                 = useRef(0);
+  const [open,       setOpen]       = useState<string | null>(null);
+  const [closing,    setClosing]    = useState(false);
+  const [menuImg,    setMenuImg]    = useState<string>("");
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const closeTimer                  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ddListRef                   = useRef<HTMLDivElement | null>(null);
+  const [canScrollUp,   setCanScrollUp]   = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+
+  useEffect(() => {
+    const fn = () => {
+      const currY = window.scrollY;
+      setScrolled(currY > 20);
+
+      // Hide main navbar on scroll down, reveal on scroll up
+      if (currY > 120 && currY > lastScrollY.current + 6) {
+        setNavHidden(true);
+      } else if (currY < lastScrollY.current - 6) {
+        setNavHidden(false);
+      }
+      lastScrollY.current = currY;
+    };
+    window.addEventListener("scroll", fn, { passive: true });
+    return () => window.removeEventListener("scroll", fn);
+  }, []);
+
+  // One pending close at a time — the button's mouseleave and the backdrop's
+  // mouseenter both call closeMenu on the way down to the panel, and a second
+  // timer used to orphan the first, which then closed the menu mid-move.
+  const clearCloseTimer = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+  };
+  const openMenu = (slug: string) => {
+    clearCloseTimer();
+    setClosing(false);
+    const fams = catalogue.find((c) => c.slug === slug)?.families ?? [];
+    if (open !== slug) setMenuImg((fams.find((f) => f.image) ?? fams[0])?.slug ?? "");
+    setOpen(slug);
+  };
+  // Grace period, then a short fade-out; re-entering at any point cancels it.
+  const closeMenu = () => {
+    clearCloseTimer();
+    closeTimer.current = setTimeout(() => {
+      setClosing(true);
+      closeTimer.current = setTimeout(() => {
+        setOpen(null);
+        setClosing(false);
+        closeTimer.current = null;
+      }, 180);
+    }, 320);
+  };
+  const keepMenu = () => {
+    clearCloseTimer();
+    setClosing(false);
+  };
+  useEffect(() => clearCloseTimer, []);
+
+  const updateScrollState = () => {
+    const el = ddListRef.current;
+    if (!el) return;
+    setCanScrollUp(el.scrollTop > 4);
+    setCanScrollDown(el.scrollTop + el.clientHeight < el.scrollHeight - 4);
+  };
+
+  const scrollDdList = (dir: 1 | -1) => {
+    const el = ddListRef.current;
+    if (!el) return;
+    el.scrollBy({ top: dir * el.clientHeight * 0.8, behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    // wait a tick for the dropdown to mount before measuring
+    const raf = requestAnimationFrame(updateScrollState);
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
+
+  const activeFamilies = open
+    ? catalogue.find((c) => c.slug === open)?.families ?? []
+    : [];
+  const previewImg = activeFamilies.find((f) => f.slug === menuImg)?.image ?? null;
+
+  if (pathname?.startsWith("/cx-ops-x7k9q2")) return null;
+
+  return (
+    <>
+      <style suppressHydrationWarning>{`
+        /* ── Base bar ── liquid glass: translucent (not the old opaque
+           --bg-surface, which made the 20px blur invisible — nothing
+           showed through it) so page content actually reads, blurred and
+           saturated, behind the bar as it scrolls underneath. */
+        /* ── Base bar ── Floating liquid glass pill navbar ── */
+        .sn {
+          position: fixed; top: 14px; left: 50%;
+          transform: translateX(-50%);
+          z-index: 200;
+          height: 64px; width: min(1440px, 95vw);
+          border-radius: 9999px;
+          background: var(--glass-bg);
+          -webkit-backdrop-filter: blur(20px) saturate(1.6);
+                  backdrop-filter: blur(20px) saturate(1.6);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+          transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), background 0.35s, border-color 0.35s, box-shadow 0.35s;
+        }
+        .sn--hidden {
+          transform: translateX(-50%) translateY(-140%);
+        }
+        .sn--on {
+          background: var(--glass-bg-raise);
+          border-color: rgba(43, 191, 179, 0.38);
+          box-shadow: 0 16px 48px -12px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+        }
+        /* Top brand accent line inside rounded container */
+        .sn::before {
+          content: '';
+          position: absolute; top: 0; left: 24px; right: 24px; height: 2px;
+          background: linear-gradient(90deg, transparent, var(--brand-teal), transparent);
+        }
+
+        .sn__inner {
+          height: 64px; width: 100%; max-width: 1440px; margin-inline: auto;
+          padding: 0 clamp(0.75rem, 2vw, 1.5rem);
+          display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+        }
+
+        /* ── Logo ── */
+        .sn__logo {
+          font-family: var(--ff-display);
+          font-size: 1.75rem; letter-spacing: 0.05em;
+          font-weight: 900;
+          color: #fff; text-decoration: none;
+          display: flex; align-items: center; gap: .75rem;
+          flex: 0 0 auto;
+          height: 48px;
+          position: relative;
+          min-width: max-content;
+          perspective: 400px;
+        }
+        .sn__logo-img {
+          height: 44px; width: auto; display: block;
+          border-radius: 8px; object-fit: contain;
+          flex-shrink: 0;
+        }
+        .sn__logo-text {
+          position: relative;
+          height: 40px; overflow: hidden;
+          display: flex; align-items: center;
+          font-size: 1.75rem; font-weight: 900;
+          letter-spacing: 0.04em;
+        }
+        .sn__logo-word {
+          display: inline-flex; white-space: nowrap;
+          transform-origin: 50% 0%;
+          will-change: transform, opacity, filter;
+          font-weight: 900;
+        }
+        .sn__logo-word em { color: var(--brand-red); font-style: normal; margin-right: 0.28em; font-weight: 900; }
+
+        .sn__logo-word--hold { transform: translateY(0); opacity: 1; }
+
+        @media(max-width:480px){
+          .sn__logo-text { display: flex; font-size: 1.15rem; height: 36px; }
+          .sn__logo-img { height: 38px; }
+        }
+
+        /* ── Nav links — centered with equal space on both sides. ── */
+        .sn__links {
+          display: flex; align-items: center;
+          flex: 0 1 auto; margin: 0 auto; gap: 0;
+        }
+        /* ── Right actions ── */
+        .sn__actions {
+          display: flex; align-items: center; gap: 0.5rem;
+          flex: 0 0 auto; justify-content: flex-end;
+        }
+
+        /* category dropdown trigger */
+        .sn__cat { position: relative; height: 64px; display: flex; align-items: center; }
+        .sn__cat-btn {
+          height: 64px; display: flex; align-items: center; gap: 0.25rem;
+          padding: 0 0.55rem;
+          font-family: var(--ff-nav); font-size: 0.8rem;
+          font-weight: 600;
+          letter-spacing: 0.03em; text-transform: uppercase;
+          color: rgba(255,255,255,0.82); background: none; border: none;
+          cursor: pointer; white-space: nowrap; text-decoration: none;
+          transition: color 0.18s;
+          position: relative;
+        }
+        .sn__cat-btn:hover { color: #fff; }
+        .sn__cat--open .sn__cat-btn { color: #fff; }
+        .sn__cat-btn svg { width: 8px; height: 8px; flex-shrink: 0; transition: transform 0.2s ease; opacity: 0.7; }
+        .sn__cat--open .sn__cat-btn svg { transform: rotate(180deg); opacity: 1; }
+
+        /* active underline */
+        .sn__cat-bar {
+          position: absolute; bottom: 0; left: 0.55rem; right: 0.55rem;
+          height: 2px; background: var(--brand-teal);
+          transform: scaleX(0); transform-origin: left;
+          transition: transform 0.22s ease;
+        }
+        .sn__cat--open .sn__cat-bar { transform: scaleX(1); }
+
+        /* plain links */
+        .sn__link {
+          height: 64px; display: flex; align-items: center;
+          padding: 0 0.55rem;
+          font-family: var(--ff-nav); font-size: 0.8rem;
+          font-weight: 600;
+          letter-spacing: 0.03em; text-transform: uppercase;
+          color: rgba(255,255,255,0.82); text-decoration: none;
+          transition: color 0.18s; white-space: nowrap;
+        }
+        .sn__link:hover { color: #fff; }
+
+        /* Divider dot */
+        .sn__divider {
+          width: 3px; height: 3px; border-radius: 50%;
+          background: rgba(255,255,255,0.3);
+          flex-shrink: 0; margin: 0 0.25rem;
+        }
+
+        /* ── CTA button ── */
+        .sn__cta {
+          position: relative; overflow: hidden;
+          margin-inline-start: auto; flex-shrink: 0;
+          font-family: var(--ff-nav); font-size: 0.8rem;
+          letter-spacing: 0.04em; text-transform: uppercase;
+          color: #080e0d; text-decoration: none;
+          background: var(--brand-teal);
+          padding: 0.5rem 1.1rem;
+          border-radius: 9999px;
+          border: 1px solid var(--brand-teal);
+          font-weight: 700;
+          white-space: nowrap;
+          box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 8px 20px -14px rgba(43,191,179,0);
+          transition: background .2s var(--ease-out, ease), transform .16s var(--ease-out, ease), box-shadow .2s var(--ease-out, ease);
+        }
+        .sn__cta::before {
+          content: ""; position: absolute; inset: 0; pointer-events: none;
+          background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.4) 48%, transparent 66%);
+          transform: translateX(-120%);
+        }
+        .sn__cta:hover {
+          background: #3dd6ca;
+          transform: translateY(-2px);
+          box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 14px 30px -12px rgba(43,191,179,0.55);
+        }
+        .sn__cta:hover::before { animation: sn-cta-shine 0.9s var(--ease-out, ease); }
+        .sn__cta:active { transform: translateY(0) scale(0.96); transition-duration: .08s; }
+        @keyframes sn-cta-shine { to { transform: translateX(120%); } }
+        @media (prefers-reduced-motion: reduce) {
+          .sn__cta { transform: none !important; }
+          .sn__cta::before { display: none; }
+          .sn__dd { animation: none; }
+          .sn__dd--closing { animation: none; opacity: 0; }
+          .sn__backdrop { animation: none; }
+        }
+
+        /* ── Dropdown ── liquid glass panel. Was rgba(10,14,26,0.97) — at
+           97% opacity the 24px blur behind it was doing almost nothing
+           visible; --glass-bg-raise keeps it readable (menu text/product
+           thumbnails need real contrast) while still showing genuine
+           depth through the blur, matching the nav bar's material. */
+        .sn__dd {
+          position: fixed; top: 86px;
+          left: 50%; transform: translateX(-50%);
+          width: clamp(320px, 58vw, 820px);
+          border-radius: 20px;
+          background: var(--glass-bg-raise);
+          border: 1px solid var(--glass-border);
+          border-top: 2px solid var(--brand-teal);
+          -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-sat));
+                  backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-sat));
+          box-shadow: 0 20px 60px rgba(0,0,0,0.65), inset 0 1px 0 var(--glass-highlight);
+          display: flex; z-index: 300;
+          animation: snDdIn 0.32s var(--ease-fluid) both;
+        }
+        @keyframes snDdIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(-12px) scale(0.98); filter: blur(4px); }
+          to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); filter: blur(0); }
+        }
+        /* invisible hover bridge over the 8px gap between the bar and the
+           panel, so moving the cursor down never "leaves" the menu */
+        .sn__dd::before {
+          content: ''; position: absolute;
+          left: 0; right: 0; bottom: 100%; height: 18px;
+        }
+        .sn__dd--closing { animation: snDdOut 0.18s ease forwards; }
+        @keyframes snDdOut {
+          from { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+          to   { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(0.985); }
+        }
+
+        .sn__backdrop {
+          position: fixed; inset: 0; top: 0; z-index: 199;
+          background: transparent;
+          pointer-events: auto;
+        }
+        @keyframes snBdIn { from { opacity: 0; } to { opacity: 1; } }
+
+        /* Dropdown list */
+        .sn__dd-list-wrap { flex: 1; position: relative; min-width: 0; }
+        .sn__dd-list {
+          padding: 0.6rem 0;
+          max-height: 65vh; overflow-y: auto;
+          scrollbar-width: thin;
+          scrollbar-color: rgba(43,191,179,0.5) transparent;
+        }
+        .sn__dd-list::-webkit-scrollbar { width: 6px; }
+        .sn__dd-list::-webkit-scrollbar-track { background: transparent; }
+        .sn__dd-list::-webkit-scrollbar-thumb {
+          background: rgba(43,191,179,0.5);
+          border-radius: 3px;
+        }
+        .sn__dd-list::-webkit-scrollbar-thumb:hover { background: rgba(43,191,179,0.8); }
+
+        /* Floating scroll buttons */
+        .sn__dd-scrollbtn {
+          position: absolute; left: 50%; transform: translateX(-50%);
+          width: 30px; height: 30px; border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          background: rgba(15,23,42,0.92);
+          border: 1px solid rgba(43,191,179,0.4);
+          color: var(--brand-teal); cursor: pointer;
+          z-index: 320;
+          box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+          opacity: 0; pointer-events: none;
+          transition: opacity 0.18s ease, background 0.18s ease, transform 0.18s ease;
+        }
+        .sn__dd-scrollbtn--visible { opacity: 1; pointer-events: auto; }
+        .sn__dd-scrollbtn:hover {
+          background: rgba(43,191,179,0.18);
+          transform: translateX(-50%) scale(1.08);
+        }
+        .sn__dd-scrollbtn svg { width: 12px; height: 12px; }
+        .sn__dd-scrollbtn--up   { top: 6px; }
+        .sn__dd-scrollbtn--down { bottom: 6px; }
+
+        .sn__dd-item {
+          display: flex; align-items: center; gap: 1rem;
+          padding: 0.7rem 1.5rem; text-decoration: none;
+          border-left: 2px solid transparent;
+          transition: background 0.14s, border-color 0.14s;
+        }
+        .sn__dd-item:hover, .sn__dd-item--on {
+          background: rgba(255,255,255,0.05);
+          border-left-color: var(--brand-red);
+        }
+        .sn__dd-thumb {
+          width: 52px; height: 38px; object-fit: contain; flex-shrink: 0;
+          filter: drop-shadow(0 2px 8px rgba(0,0,0,0.6));
+          transition: transform 0.18s ease;
+        }
+        .sn__dd-item:hover .sn__dd-thumb { transform: scale(1.1); }
+        .sn__dd-series {
+          display: block; font-family: var(--ff-nav);
+          font-size: 1rem; color: #fff; line-height: 1.2;
+          letter-spacing: 0.02em;
+        }
+        .sn__dd-tag {
+          display: block; font-family: var(--ff-body); font-size: 0.72rem;
+          color: rgba(255,255,255,0.7); margin-top: 0.2rem; line-height: 1.4;
+        }
+
+        /* Dropdown preview panel */
+        .sn__dd-preview {
+          width: 200px; flex-shrink: 0;
+          border-left: 1px solid rgba(255,255,255,0.08);
+          display: flex; align-items: center; justify-content: center;
+          padding: 1.5rem 1.25rem; position: relative; overflow: hidden;
+          background: rgba(255,255,255,0.02);
+        }
+        .sn__dd-preview-img {
+          width: 100%; height: auto; object-fit: contain;
+          filter: drop-shadow(0 8px 24px rgba(0,0,0,0.6));
+          transition: opacity 0.18s ease;
+        }
+        .sn__dd-glow {
+          position: absolute; inset: 0; pointer-events: none;
+          background: radial-gradient(ellipse at 50% 90%, rgba(43,191,179,0.12) 0%, transparent 65%);
+        }
+
+        @media (max-width: 1680px) {
+          .sn__link--hide { display: none; }
+          .sn__divider    { display: none; }
+        }
+        @media (max-width: 768px) {
+          .sn__dd { width: 96vw; }
+          .sn__dd-preview { display: none; }
+        }
+
+        /* ── Hamburger button ── */
+        .sn__burger {
+          display: none;
+          flex-direction: column; justify-content: center; align-items: center;
+          gap: 5px; width: 40px; height: 40px;
+          background: none; border: none; cursor: pointer;
+          margin-inline-start: auto; padding: 0; flex-shrink: 0;
+        }
+        .sn__burger span {
+          display: block; width: 22px; height: 1.5px;
+          background: var(--brand-teal); transition: transform .22s ease, opacity .22s ease;
+        }
+        .sn__burger--open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); }
+        .sn__burger--open span:nth-child(2) { opacity: 0; }
+        .sn__burger--open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); }
+
+        /* ── Mobile drawer — full-height left slide ── */
+        .sn__mobile {
+          display: flex;
+          position: fixed;
+          top: 0; left: 0; bottom: 0;
+          width: min(82vw, 320px);
+          background: var(--bg-base);
+          border-right: 1px solid var(--bg-line);
+          z-index: 9100;
+          flex-direction: column;
+          padding: 0;
+          gap: 0;
+          overflow-y: auto;
+          overflow-x: hidden;
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+          transform: translateX(-100%);
+          visibility: hidden;
+          pointer-events: none;
+          transition: transform 0.32s cubic-bezier(0.16,1,0.3,1),
+                      visibility 0s linear 0.32s;
+          box-shadow: 8px 0 40px rgba(0,0,0,0.8);
+        }
+        .sn__mobile::-webkit-scrollbar { display: none; width: 0; height: 0; }
+        .sn__mobile--open {
+          transform: translateX(0);
+          visibility: visible;
+          pointer-events: auto;
+          transition: transform 0.32s cubic-bezier(0.16,1,0.3,1),
+                      visibility 0s linear 0s;
+        }
+
+        /* drawer header — logo + close */
+        .sn__mob-header {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 1.1rem 1.25rem;
+          border-bottom: 1px solid rgba(43,191,179,0.12);
+          flex-shrink: 0;
+          background: rgba(43,191,179,0.04);
+        }
+        .sn__mob-logo {
+          font-family: var(--ff-nav); font-size: 1.2rem;
+          letter-spacing: .05em; color: #fff; text-decoration: none;
+        }
+        .sn__mob-logo em { color: var(--brand-teal); font-style: normal; margin-right: .2em; }
+        .sn__mob-close {
+          width: 36px; height: 36px;
+          display: flex; align-items: center; justify-content: center;
+          background: rgba(255,255,255,.05);
+          border: 1px solid rgba(255,255,255,.1);
+          color: rgba(255,255,255,.7); cursor: pointer;
+          transition: background .15s, color .15s;
+          flex-shrink: 0;
+        }
+        .sn__mob-close:hover { background: rgba(43,191,179,.12); color: var(--brand-teal); }
+
+        /* nav links */
+        .sn__mob-links { flex: 1; display: flex; flex-direction: column; padding: .5rem 0; }
+
+        /* backdrop */
+        .sn__mob-bd {
+          display: none;
+          position: fixed; inset: 0; z-index: 9099;
+          background: rgba(0,0,0,0.65);
+          backdrop-filter: blur(3px);
+          -webkit-backdrop-filter: blur(3px);
+        }
+        .sn__mob-bd--open { display: block; }
+
+        .sn__mobile-link {
+          font-family: var(--ff-nav); font-size: 1.1rem;
+          letter-spacing: .04em; text-transform: uppercase;
+          color: rgba(255,255,255,0.72); text-decoration: none;
+          padding: .9rem 1.5rem;
+          border-bottom: 1px solid rgba(255,255,255,.04);
+          display: flex; align-items: center; justify-content: space-between;
+          position: relative; overflow: hidden;
+          transition: color .18s, background .18s;
+        }
+        .sn__mobile-link::after {
+          content: "→";
+          font-size: 0.85rem;
+          color: var(--brand-teal);
+          opacity: 0;
+          transform: translateX(-8px);
+          transition: opacity .18s, transform .18s;
+        }
+        .sn__mobile-link:hover {
+          color: #fff;
+          background: rgba(43,191,179,0.06);
+        }
+        .sn__mobile-link:hover::after {
+          opacity: 1;
+          transform: translateX(0);
+        }
+        .sn__mobile-cta {
+          display: flex; align-items: center; justify-content: center;
+          width: 100%;
+          font-family: var(--ff-nav); font-size: 1rem;
+          letter-spacing: .06em; text-transform: uppercase;
+          background: var(--brand-teal); color: #080e0d;
+          font-weight: 700; padding: .9rem 1.5rem;
+          text-decoration: none; border: 1px solid var(--brand-teal);
+          transition: background .18s, transform .14s var(--ease-out, ease);
+        }
+        .sn__mobile-cta:hover { background: #3dd6ca; }
+        .sn__mobile-cta:active { transform: scale(0.97); transition-duration: .08s; }
+
+        /* below this, the 4 category buttons + logo + actions no longer fit
+           on one line even with the secondary links already hidden (see the
+           1380px breakpoint above) — switch to the hamburger before that
+           point is reached, not after, or content overlaps instead of
+           collapsing into the mobile menu */
+        .sn__desktop-only {
+          display: flex;
+          align-items: center;
+          gap: 0.35rem;
+        }
+
+        @media (max-width: 1024px) {
+          .sn__links  { display: none; }
+          .sn__burger { display: flex; }
+          .sn__desktop-only { display: none !important; }
+
+          .sn__logo {
+            position: relative;
+            display: flex;
+            align-items: center;
+            overflow: visible;
+          }
+
+          .sn__logo-img {
+            will-change: transform;
+            animation: mobileLogoRoll 7s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+            border-radius: 8px;
+          }
+
+          .sn__logo-text {
+            display: flex !important;
+            align-items: center;
+            font-size: 1.25rem !important;
+            font-weight: 900 !important;
+            height: 38px;
+            will-change: opacity, transform;
+            animation: mobileLogoTextReveal 7s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+          }
+        }
+
+        @keyframes mobileLogoRoll {
+          0%, 28% {
+            transform: translateX(0) rotate(0deg);
+          }
+          48%, 62% {
+            transform: translateX(clamp(150px, 52vw, 230px)) rotate(540deg);
+          }
+          78%, 100% {
+            transform: translateX(0) rotate(0deg);
+          }
+        }
+
+        @keyframes mobileLogoTextReveal {
+          0%, 26% {
+            opacity: 1;
+            transform: translateX(0) scale(1);
+          }
+          34%, 64% {
+            opacity: 0;
+            transform: translateX(-12px) scale(0.92);
+          }
+          76%, 100% {
+            opacity: 1;
+            transform: translateX(0) scale(1);
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .sn__logo-img,
+          .sn__logo-text {
+            animation: none !important;
+          }
+        }
+
+        @media (max-width: 640px) {
+          .sn__cta    { display: none; }
+        }
+
+        /* ── Light mode overrides ── */
+        [data-theme="light"] .sn__logo { color: var(--ink); }
+        [data-theme="light"] .sn__cat-btn { color: var(--ink-60); }
+        [data-theme="light"] .sn__cat-btn:hover,
+        [data-theme="light"] .sn__cat--open .sn__cat-btn { color: var(--ink); }
+        [data-theme="light"] .sn__link { color: var(--ink-60); }
+        [data-theme="light"] .sn__link:hover { color: var(--ink); }
+        [data-theme="light"] .sn__divider { background: var(--ink-15); }
+        [data-theme="light"] .sn__burger span { background: #0d2220; }
+
+        html[data-theme="light"] .sn__dd,
+        [data-theme="light"] .sn__dd {
+          background: #ffffff !important;
+          border-color: rgba(13, 34, 32, 0.18) !important;
+          box-shadow: 0 20px 60px rgba(13, 34, 32, 0.15) !important;
+        }
+        [data-theme="light"] .sn__dd-item:hover,
+        [data-theme="light"] .sn__dd-item--on { background: var(--brand-teal-dim); }
+        [data-theme="light"] .sn__dd-series { color: var(--ink); }
+        [data-theme="light"] .sn__dd-tag { color: var(--ink-35); }
+        [data-theme="light"] .sn__dd-preview {
+          border-left-color: var(--bg-line);
+          background: var(--brand-teal-glow);
+        }
+        [data-theme="light"] .sn__dd-scrollbtn {
+          background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
+          border-color: color-mix(in srgb, var(--brand-teal) 30%, transparent);
+        }
+        [data-theme="light"] .sn__dd-scrollbtn:hover { background: var(--brand-teal-dim); }
+
+        /* mobile drawer — handled by CSS variables */
+        [data-theme="light"] .sn__mobile {
+          box-shadow: 8px 0 40px color-mix(in srgb, var(--bg-base) 15%, transparent);
+        }
+        [data-theme="light"] .sn__mob-header {
+          border-bottom-color: var(--bg-line);
+          background: var(--brand-teal-dim);
+        }
+        [data-theme="light"] .sn__mob-logo { color: var(--ink); }
+        [data-theme="light"] .sn__mob-close {
+          background: var(--bg-line);
+          border-color: var(--bg-line);
+          color: var(--ink-60);
+        }
+        [data-theme="light"] .sn__mob-close:hover { background: rgba(43,191,179,0.14); color: var(--brand-teal); }
+        [data-theme="light"] .sn__mobile-link {
+          color: var(--ink-60);
+          border-bottom-color: var(--bg-line);
+        }
+        [data-theme="light"] .sn__mobile-link:hover {
+          color: var(--ink);
+          background: var(--brand-teal-dim);
+        }
+        [data-theme="light"] .sn__mob-bd { background: color-mix(in srgb, var(--ink) 35%, transparent); }
+      `}</style>
+
+      <nav className={`sn${scrolled ? " sn--on" : ""}${navHidden ? " sn--hidden" : ""}`}>
+        <div className="sn__inner">
+
+          <TransitionLink href="/" className="sn__logo" aria-label={t("logoAria")}>
+            <Image src="/logo.jpeg" alt="Ashal Innomech" className="sn__logo-img" width={40} height={40} priority />
+            <span className="sn__logo-text">
+              <span className="sn__logo-word sn__logo-word--hold">
+                <em>ASHAL</em>{" INNOMECH"}
+              </span>
+            </span>
+          </TransitionLink>
+
+          <div className="sn__links">
+            {catalogue.map((cat) => (
+              <div
+                key={cat.slug}
+                className={`sn__cat${open === cat.slug ? " sn__cat--open" : ""}`}
+                onMouseEnter={() => openMenu(cat.slug)}
+                onMouseLeave={closeMenu}
+              >
+                <TransitionLink href={`/products/${cat.slug}`} className="sn__cat-btn">
+                  {cat.name.replace(" Machines", "").replace(" & Lab Lines", "")}
+                  <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M1 1l4 4 4-4" />
+                  </svg>
+                </TransitionLink>
+                <div className="sn__cat-bar" />
+              </div>
+            ))}
+
+            <span className="sn__divider" />
+
+            <TransitionLink href="/products" className="sn__link">{t("allProducts")}</TransitionLink>
+          </div>
+
+          <div className="sn__actions">
+            <div className="sn__desktop-only">
+              <RollingNavMenu />
+            </div>
+            <ThemeToggle />
+            <TransitionLink href="/inquiries" className="sn__cta">{t("getQuote")}</TransitionLink>
+
+            {/* Hamburger — mobile only */}
+            <button
+              className={`sn__burger${mobileOpen ? " sn__burger--open" : ""}`}
+              aria-label={mobileOpen ? t("closeMenu") : t("openMenu")}
+              onClick={() => setMobileOpen(v => !v)}
+            >
+              <span /><span /><span />
+            </button>
+          </div>
+        </div>
+
+      </nav>
+
+      {/* Mobile backdrop + drawer live OUTSIDE .sn so overflow/backdrop-filter
+          on the bar can't clip the full-height fixed drawer */}
+      <div
+        className={`sn__mob-bd${mobileOpen ? " sn__mob-bd--open" : ""}`}
+        onClick={() => setMobileOpen(false)}
+      />
+
+      {/* Mobile drawer — full height, slides from left */}
+      <div className={`sn__mobile${mobileOpen ? " sn__mobile--open" : ""}`}>
+
+        {/* Header: logo + close */}
+        <div className="sn__mob-header">
+          <TransitionLink href="/" className="sn__mob-logo" onClick={() => setMobileOpen(false)}>
+            <em>ASHAL</em>{" INNOMECH"}
+          </TransitionLink>
+          <button className="sn__mob-close" aria-label={t("closeMenu")} onClick={() => setMobileOpen(false)}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <path d="M2 2l12 12M14 2L2 14"/>
+            </svg>
+          </button>
+        </div>
+
+        {/* Nav links */}
+        <div className="sn__mob-links">
+          {catalogue.map(cat => (
+            <TransitionLink key={cat.slug} href={`/products/${cat.slug}`} className="sn__mobile-link" onClick={() => setMobileOpen(false)}>
+              {cat.name}
+            </TransitionLink>
+          ))}
+          <TransitionLink href="/products" className="sn__mobile-link" onClick={() => setMobileOpen(false)}>{t("allProducts")}</TransitionLink>
+          <TransitionLink href="/production-line" className="sn__mobile-link" onClick={() => setMobileOpen(false)}>{t("productionLine")}</TransitionLink>
+          <TransitionLink href="/news"     className="sn__mobile-link" onClick={() => setMobileOpen(false)}>{t("news")}</TransitionLink>
+          <TransitionLink href="/about"    className="sn__mobile-link" onClick={() => setMobileOpen(false)}>{t("about")}</TransitionLink>
+          <TransitionLink href="/inquiries"  className="sn__mobile-link" onClick={() => setMobileOpen(false)}>{t("contact")}</TransitionLink>
+        </div>
+
+        {/* Language + Theme + CTA pinned to bottom */}
+        <div style={{ padding:"1.25rem", borderTop:"1px solid var(--bg-line)", flexShrink:0, display:"flex", flexDirection:"column", gap:"0.85rem" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
+            <ThemeToggle />
+          </div>
+          <TransitionLink href="/inquiries" className="sn__mobile-cta" onClick={() => setMobileOpen(false)}>
+            {t("getQuote")}
+          </TransitionLink>
+        </div>
+      </div>
+
+      {/* backdrop + dropdown live OUTSIDE .sn so the nav's overflow:hidden /
+          backdrop-filter can't clip the fixed layer below the 72px bar */}
+      {open && <div className="sn__backdrop" onMouseEnter={closeMenu} />}
+
+      {open && (
+        <div className={`sn__dd${closing ? " sn__dd--closing" : ""}`} onMouseEnter={keepMenu} onMouseLeave={closeMenu}>
+          <div className="sn__dd-list-wrap">
+            <div className="sn__dd-list" ref={ddListRef} onScroll={updateScrollState}>
+              {activeFamilies.map((fam) => (
+                <TransitionLink
+                  key={fam.slug}
+                  href={`/products/${open}/${fam.slug}`}
+                  className={`sn__dd-item${menuImg === fam.slug ? " sn__dd-item--on" : ""}`}
+                  onMouseEnter={() => setMenuImg(fam.slug)}
+                >
+                  {fam.image
+                    ? <Image src={fam.image} alt="" aria-hidden="true" width={52} height={38} className="sn__dd-thumb" />
+                    : <span className="sn__dd-thumb" aria-hidden="true" />}
+                  <div>
+                    <span className="sn__dd-series">{fam.series}</span>
+                    <span className="sn__dd-tag">{fam.tagline}</span>
+                  </div>
+                </TransitionLink>
+              ))}
+            </div>
+            <button
+              type="button"
+              aria-label="Scroll up"
+              className={`sn__dd-scrollbtn sn__dd-scrollbtn--up${canScrollUp ? " sn__dd-scrollbtn--visible" : ""}`}
+              onClick={() => scrollDdList(-1)}
+              tabIndex={canScrollUp ? 0 : -1}
+            >
+              <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M1 5l4-4 4 4" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              aria-label="Scroll down"
+              className={`sn__dd-scrollbtn sn__dd-scrollbtn--down${canScrollDown ? " sn__dd-scrollbtn--visible" : ""}`}
+              onClick={() => scrollDdList(1)}
+              tabIndex={canScrollDown ? 0 : -1}
+            >
+              <svg viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M1 1l4 4 4-4" />
+              </svg>
+            </button>
+          </div>
+          <div className="sn__dd-preview">
+            <div className="sn__dd-glow" />
+            {previewImg && (
+              <Image key={previewImg} src={previewImg} alt="" aria-hidden="true" width={160} height={160} className="sn__dd-preview-img" />
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

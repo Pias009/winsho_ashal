@@ -1,0 +1,2704 @@
+"use client";
+import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
+import {
+  Camera, Star, X, Plus, CheckCircle2, Package, Loader2,
+  AlertTriangle, Search, Eye, Copy, Trash2, ArrowLeft, ExternalLink, Sparkles,
+  Monitor, Smartphone, FileSpreadsheet, ArrowUp, ArrowDown
+} from "lucide-react";
+import type { Field, Collection, SectionSchema } from "@/lib/cmsSchemas";
+import { CATEGORY_ICON as SHARED_CATEGORY_ICON } from "./adminIcons";
+import { upgradeImage, type ProductImageMap } from "@/lib/productImages";
+
+/** Photo to show for a CMS list item: its own image field if set, otherwise
+ *  the current main photo of the machine it links to (by slug). Legacy
+ *  /machines/ paths are upgraded to that live photo. */
+function itemImage(item: Item, photos: ProductImageMap): string {
+  const own = [item.customImage, item.img, item.src, item.image, item.heroImage, Array.isArray(item.images) ? item.images[0] : ""]
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .find(Boolean);
+  if (own) return upgradeImage(own, photos);
+  return (typeof item.slug === "string" && photos[item.slug]) || "";
+}
+
+/** category slug → photo of the first machine in it (categories have no
+ *  photo of their own) */
+function categoryPhotos(families: Item[], photos: ProductImageMap): ProductImageMap {
+  const m: ProductImageMap = {};
+  for (const f of families) {
+    const cat = String(f.category ?? ""), img = photos[String(f.slug ?? "")];
+    if (cat && img && !m[cat]) m[cat] = img;
+  }
+  return m;
+}
+
+type Json = Record<string, unknown>;
+type Item = Record<string, unknown>;
+
+// ── validation types ───────────────────────────────────────
+interface ValidationWarning {
+  field: string;
+  message: string;
+  severity: "error" | "warning";
+}
+
+// ── shared styles ──────────────────────────────────────────
+const label: React.CSSProperties = {
+  fontFamily: "var(--ff-body)", fontSize: "0.92rem", fontWeight: 600,
+  color: "rgba(255,255,255,0.85)",
+};
+const hintStyle: React.CSSProperties = {
+  fontFamily: "var(--ff-body)", fontSize: "0.82rem", fontWeight: 400,
+  color: "rgba(255,255,255,0.4)",
+};
+const inputStyle: React.CSSProperties = {
+  width: "100%", padding: "0.75rem 0.95rem", borderRadius: 10,
+  background: "#162338",
+  border: "1px solid rgba(255,255,255,0.08)",
+  color: "#fff", fontFamily: "var(--ff-body)", fontSize: "0.95rem",
+  outline: "none",
+  transition: "border-color 0.2s ease, box-shadow 0.2s ease",
+};
+const btnBase: React.CSSProperties = {
+  padding: "0.6rem 1.15rem", borderRadius: 10,
+  border: "none", cursor: "pointer",
+  fontFamily: "var(--ff-body), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+  fontSize: "0.88rem", fontWeight: 700, letterSpacing: "0.02em",
+  display: "inline-flex", alignItems: "center", gap: "0.45rem",
+  transition: "all 0.18s cubic-bezier(0.2, 0.8, 0.2, 1)",
+  boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+};
+const smallBtn: React.CSSProperties = {
+  ...btnBase,
+  background: "linear-gradient(135deg, rgba(43, 191, 179, 0.2) 0%, rgba(13, 148, 136, 0.15) 100%)",
+  color: "#5eead4",
+  border: "1px solid rgba(43, 191, 179, 0.4)",
+};
+const dangerBtn: React.CSSProperties = {
+  ...btnBase, padding: "0.55rem 0.95rem",
+  background: "rgba(244, 63, 94, 0.15)", color: "#fda4af",
+  border: "1px solid rgba(244, 63, 94, 0.35)",
+};
+const iconBtn: React.CSSProperties = {
+  ...btnBase, padding: "0.55rem 0.85rem",
+  background: "#162338", color: "rgba(255,255,255,0.9)",
+  border: "1px solid rgba(255,255,255,0.12)",
+};
+
+function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: string }) {
+  return (
+    <div style={{ marginBottom: "0.5rem" }}>
+      <span style={{ ...label, display: "block" }}>{children}</span>
+      {hint && <span style={{ ...hintStyle, display: "block", marginTop: "0.15rem" }}>{hint}</span>}
+    </div>
+  );
+}
+
+// ── validation warning modal ──────────────────────────────
+function WarningModal({ warnings, onConfirm, onCancel, title }: {
+  warnings: ValidationWarning[];
+  onConfirm: () => void;
+  onCancel: () => void;
+  title: string;
+}) {
+  const errors = warnings.filter(w => w.severity === "error");
+  const warns = warnings.filter(w => w.severity === "warning");
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      display: "flex", alignItems: "center", justifyContent: "center",
+      background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+    }} onClick={onCancel}>
+      <div style={{
+        background: "var(--adm-surface-2)", border: "1px solid var(--adm-border-hi)",
+        borderRadius: 16, padding: "2rem", maxWidth: 520, width: "90%",
+        boxShadow: "0 24px 60px -12px rgba(0,0,0,0.6)",
+      }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1.25rem" }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 10,
+            background: errors.length > 0 ? "rgba(255,107,125,0.15)" : "rgba(245,196,81,0.15)",
+            display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          }}>
+            <AlertTriangle size={20} color={errors.length > 0 ? "#ff6b7d" : "#f5c451"} />
+          </div>
+          <div>
+            <h3 style={{ fontFamily: "var(--ff-display)", fontSize: "1.3rem", color: "#fff", margin: 0 }}>{title}</h3>
+            <p style={{ fontFamily: "var(--ff-body)", fontSize: "0.85rem", color: "rgba(255,255,255,0.5)", margin: "0.25rem 0 0" }}>
+              {errors.length > 0 ? "Fix these errors before saving" : "Save anyway or fix first?"}
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "1.5rem", maxHeight: 240, overflowY: "auto" }}>
+          {errors.map((w, i) => (
+            <div key={`e-${i}`} style={{
+              display: "flex", gap: "0.6rem", alignItems: "flex-start",
+              padding: "0.7rem 0.9rem", borderRadius: 10,
+              background: "rgba(255,107,125,0.08)", border: "1px solid rgba(255,107,125,0.2)",
+            }}>
+              <X size={15} color="#ff6b7d" style={{ marginTop: 2, flexShrink: 0 }} />
+              <div>
+                <span style={{ fontFamily: "var(--ff-body)", fontSize: "0.85rem", fontWeight: 600, color: "#ff8a97" }}>{w.field}</span>
+                <p style={{ fontFamily: "var(--ff-body)", fontSize: "0.82rem", color: "rgba(255,255,255,0.6)", margin: "0.15rem 0 0" }}>{w.message}</p>
+              </div>
+            </div>
+          ))}
+          {warns.map((w, i) => (
+            <div key={`w-${i}`} style={{
+              display: "flex", gap: "0.6rem", alignItems: "flex-start",
+              padding: "0.7rem 0.9rem", borderRadius: 10,
+              background: "rgba(245,196,81,0.08)", border: "1px solid rgba(245,196,81,0.2)",
+            }}>
+              <AlertTriangle size={15} color="#f5c451" style={{ marginTop: 2, flexShrink: 0 }} />
+              <div>
+                <span style={{ fontFamily: "var(--ff-body)", fontSize: "0.85rem", fontWeight: 600, color: "#f5c451" }}>{w.field}</span>
+                <p style={{ fontFamily: "var(--ff-body)", fontSize: "0.82rem", color: "rgba(255,255,255,0.6)", margin: "0.15rem 0 0" }}>{w.message}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end" }}>
+          <button type="button" onClick={onCancel} style={{
+            ...btnBase, background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.7)",
+          }}>Cancel</button>
+          {errors.length === 0 && (
+            <button type="button" onClick={onConfirm} style={{
+              ...btnBase, background: "var(--brand-teal)", color: "#04211e",
+            }}>Save anyway</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── inline warning indicator on fields ────────────────────
+function FieldWarning({ msg }: { msg: string }) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: "0.3rem",
+      fontFamily: "var(--ff-body)", fontSize: "0.78rem", fontWeight: 600,
+      color: "#f5c451", marginTop: "0.3rem",
+    }}>
+      <AlertTriangle size={12} /> {msg}
+    </span>
+  );
+}
+
+// ── image field with local upload ──────────────────────────
+function ImageField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function upload(file: File) {
+    setBusy(true); setErr("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/admin/upload", { method: "POST", body: fd });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "upload failed");
+      onChange(j.path);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
+        {value && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={value} alt="" style={{
+            width: 72, height: 72, objectFit: "contain", borderRadius: 10,
+            background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", padding: 6, flexShrink: 0,
+          }} />
+        )}
+        <div style={{ flex: 1, minWidth: 200, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+          <input style={inputStyle} value={value} onChange={e => onChange(e.target.value)} placeholder="/uploads/…" />
+          <label style={{ ...smallBtn, cursor: busy ? "wait" : "pointer", alignSelf: "flex-start" }}>
+            {busy ? <Loader2 size={14} className="adm-spin-icon" /> : <Camera size={14} />} {busy ? "Uploading…" : "Upload a photo"}
+            <input type="file" accept="image/*" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
+          </label>
+        </div>
+      </div>
+      {err && <div style={{ ...hintStyle, color: "#ff8a97", marginTop: "0.4rem" }}>{err}</div>}
+    </div>
+  );
+}
+
+// ── unlimited photo gallery — upload as many as you like, first = primary ──
+function ImagesField({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function uploadOne(file: File): Promise<string> {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/admin/upload", { method: "POST", body: fd });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error ?? "upload failed");
+    return j.path as string;
+  }
+
+  async function uploadMany(files: FileList) {
+    setBusy(true); setErr("");
+    try {
+      const paths: string[] = [];
+      for (const file of Array.from(files)) paths.push(await uploadOne(file));
+      onChange([...value, ...paths]);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function remove(i: number) { onChange(value.filter((_, j) => j !== i)); }
+  function makePrimary(i: number) {
+    if (i === 0) return;
+    const next = [...value];
+    const [pick] = next.splice(i, 1);
+    next.unshift(pick);
+    onChange(next);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: "0.75rem" }}>
+        {value.map((src, i) => (
+          <div key={i} style={{ position: "relative" }}>
+            <div style={{
+              aspectRatio: "1", borderRadius: 12, overflow: "hidden",
+              background: "rgba(255,255,255,0.06)",
+              border: i === 0 ? "2px solid var(--brand-teal)" : "1px solid rgba(255,255,255,0.1)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={src} alt="" style={{ width: "100%", height: "100%", objectFit: "contain", padding: 6 }} />
+            </div>
+            {i === 0 && (
+              <span style={{
+                position: "absolute", top: 6, left: 6, borderRadius: 6,
+                background: "var(--brand-teal)", color: "#04211e",
+                fontFamily: "var(--ff-body)", fontSize: "0.65rem", fontWeight: 700,
+                padding: "0.15rem 0.4rem",
+              }}>Main photo</span>
+            )}
+            <div style={{ display: "flex", gap: "0.3rem", marginTop: "0.4rem" }}>
+              {i !== 0 && (
+                <button type="button" title="Set as main photo" style={{ ...iconBtn, flex: 1, padding: "0.35rem", fontSize: "0.75rem" }}
+                  onClick={() => makePrimary(i)}><Star size={12} /> Set main</button>
+              )}
+              <button type="button" title="Remove photo" style={{ ...dangerBtn, padding: "0.35rem", fontSize: "0.75rem" }}
+                onClick={() => remove(i)}><X size={13} /></button>
+            </div>
+          </div>
+        ))}
+
+        <label style={{
+          aspectRatio: "1", borderRadius: 12, cursor: busy ? "wait" : "pointer",
+          border: "2px dashed rgba(255,255,255,0.2)",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.4rem",
+          color: "rgba(255,255,255,0.55)", fontFamily: "var(--ff-body)", fontSize: "0.85rem", fontWeight: 600,
+        }}>
+          <Plus size={22} />
+          {busy ? "Uploading…" : "Add photos"}
+          <input type="file" accept="image/*" multiple style={{ display: "none" }}
+            onChange={e => { if (e.target.files?.length) uploadMany(e.target.files); e.target.value = ""; }} />
+        </label>
+      </div>
+      {err && <div style={{ ...hintStyle, color: "#ff8a97", marginTop: "0.6rem" }}>{err}</div>}
+    </div>
+  );
+}
+
+// ── {title, detail, image}[] editor — shared by the top-level "steps"
+// field kind and the per-part install-guide editor nested inside "parts" ──
+type Step = { title: string; detail: string; image?: string };
+function StepsEditor({ value, onChange }: { value: Step[]; onChange: (v: Step[]) => void }) {
+  const rows = value ?? [];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      {rows.map((r, i) => (
+        <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <span style={{
+              width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
+              background: "var(--brand-teal)", color: "#04211e",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontFamily: "var(--ff-body)", fontSize: "0.85rem", fontWeight: 700,
+            }}>{i + 1}</span>
+            <input style={{ ...inputStyle, flex: 1 }} value={r.title} placeholder="Step title"
+              onChange={e => { const n = rows.map(x => ({ ...x })); n[i].title = e.target.value; onChange(n); }} />
+            <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+          </div>
+          <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} value={r.detail} placeholder="What happens in this step"
+            onChange={e => { const n = rows.map(x => ({ ...x })); n[i].detail = e.target.value; onChange(n); }} />
+          <div>
+            <span style={{ ...hintStyle, display: "block", marginBottom: "0.35rem" }}>Step photo or diagram (shown on the product page)</span>
+            <ImageField value={r.image ?? ""} onChange={v => { const n = rows.map(x => ({ ...x })); n[i].image = v; onChange(n); }} />
+          </div>
+        </div>
+      ))}
+      <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { title: "", detail: "", image: "" }])}>+ Add step</button>
+    </div>
+  );
+}
+
+// ── product model dropdown selector for hero section ──────
+// ── product model dropdown selector with automatic catalogue data filling ──────
+function ProductSelectField({
+  value,
+  onChange,
+  onItemChange,
+  item,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onItemChange?: (key: string, v: unknown) => void;
+  item?: Item;
+}) {
+  const [categories, setCategories] = useState<{ slug: string; name: string }[]>([]);
+  const [products, setProducts] = useState<{ slug: string; name: string; series: string; category: string }[]>([]);
+  const [rawFamilies, setRawFamilies] = useState<any[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/admin/data/products")
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => {
+        if (alive && j) {
+          if (Array.isArray(j.categories)) {
+            setCategories(j.categories.map((c: any) => ({ slug: c.slug, name: c.name || c.slug })));
+          }
+          if (Array.isArray(j.families)) {
+            setRawFamilies(j.families);
+            setProducts(j.families.map((f: any) => ({
+              slug: f.slug ?? "",
+              name: f.name || f.slug || "",
+              series: f.series || "",
+              category: f.category || "",
+            })));
+          }
+        }
+      })
+      .catch(() => { /* ignore */ });
+    return () => { alive = false; };
+  }, []);
+
+  const handleAutoFill = (selectedSlug: string) => {
+    if (!selectedSlug || !onItemChange || !item || !rawFamilies.length) return;
+    const f = rawFamilies.find((p: any) => p.slug === selectedSlug);
+    if (!f) return;
+
+    // 1. Primary photo
+    const photo = f.images?.[0] || f.gallery?.[0]?.src || f.radarImage || "";
+    if (photo) {
+      if ("customImage" in item) onItemChange("customImage", photo);
+      if ("img" in item) onItemChange("img", photo);
+      if ("src" in item) onItemChange("src", photo);
+    }
+
+    // 2. Main stat & stat label (for machine-catalog cards)
+    if ("stat" in item || "label" in item) {
+      const topSpec = f.specs?.find((s: any) => /output|speed|width|capacity/i.test(s.label)) || f.specs?.[0];
+      if (topSpec) {
+        const statVal = Array.isArray(topSpec.values) ? topSpec.values[0] : String(topSpec.values || "");
+        if ("stat" in item) onItemChange("stat", statVal);
+        if ("label" in item) onItemChange("label", topSpec.label || "Max Output");
+      }
+    }
+
+    // 3. Hero custom fields
+    if ("customSeries" in item && f.series) onItemChange("customSeries", f.series);
+    if ("customName" in item && f.name) onItemChange("customName", f.name);
+    if ("customHref" in item) onItemChange("customHref", `/products/${f.category}/${f.slug}`);
+
+    // 4. Scrollhome specs & features
+    if ("specs" in item && Array.isArray(f.specs)) {
+      const specRows = f.specs.slice(0, 7).map((s: any) => ({
+        label: s.label,
+        value: Array.isArray(s.values) ? s.values.join(" / ") : String(s.values || "")
+      }));
+      onItemChange("specs", specRows);
+    }
+
+    if ("features" in item) {
+      const featureRows = [
+        { head: f.series || "High Performance", body: f.tagline || `${f.name} engineered by Ashal Innomech.` },
+        { head: "Precision Control", body: `Compatible with ${f.materials || "PE, PP & biodegradable resins"}.` },
+        { head: "High Efficiency", body: "Optimized for continuous factory floor operations." },
+      ];
+      onItemChange("features", featureRows);
+    }
+  };
+
+  const handleSelectChange = (newSlug: string) => {
+    onChange(newSlug);
+    handleAutoFill(newSlug);
+  };
+
+  const defaultCats = [
+    { slug: "film-blowing", name: "Film Blowing Machines" },
+    { slug: "bag-making", name: "Bag Making Machines" },
+    { slug: "recycling", name: "Recycling & Lab Lines" },
+    { slug: "printing", name: "Flexographic Printing Machines" },
+  ];
+
+  const activeCategories = categories.length > 0 ? categories : defaultCats;
+  const knownCatSlugs = new Set(activeCategories.map(c => c.slug));
+  const uncategorized = products.filter(p => !knownCatSlugs.has(p.category));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+      <select
+        style={{ ...inputStyle, appearance: "auto", fontWeight: 500 }}
+        value={value ?? ""}
+        onChange={e => handleSelectChange(e.target.value)}
+      >
+        <option value="" style={{ color: "#aaa", background: "#111" }}>-- Select machine model from catalogue --</option>
+        {activeCategories.map(cat => {
+          const catProds = products.filter(p => p.category === cat.slug);
+          if (catProds.length === 0) return null;
+          return (
+            <optgroup key={cat.slug} label={`📂 ${cat.name}`} style={{ color: "#2BBFB3", background: "#18181b", fontWeight: 700 }}>
+              {catProds.map(p => (
+                <option key={p.slug} value={p.slug} style={{ color: "#e4e4e7", background: "#09090b", fontWeight: 400 }}>
+                  {p.series ? `${p.series} · ` : ""}{p.name} ({p.slug})
+                </option>
+              ))}
+            </optgroup>
+          );
+        })}
+        {uncategorized.length > 0 && (
+          <optgroup label="📂 Other Products" style={{ color: "#888", background: "#18181b" }}>
+            {uncategorized.map(p => (
+              <option key={p.slug} value={p.slug} style={{ color: "#e4e4e7", background: "#09090b" }}>
+                {p.series ? `${p.series} · ` : ""}{p.name} ({p.slug})
+              </option>
+            ))}
+          </optgroup>
+        )}
+      </select>
+
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "var(--ff-body)", fontSize: "0.8rem", color: "rgba(255,255,255,0.4)" }}>
+          Or enter model slug directly:
+        </span>
+        <input
+          style={{ ...inputStyle, padding: "0.4rem 0.7rem", fontSize: "0.88rem", flex: 1, minWidth: 140 }}
+          value={value ?? ""}
+          placeholder="e.g. s-standard"
+          onChange={e => handleSelectChange(e.target.value)}
+        />
+        {value && onItemChange && (
+          <button
+            type="button"
+            onClick={() => handleAutoFill(value)}
+            style={{
+              padding: "0.35rem 0.75rem",
+              borderRadius: "0.375rem",
+              background: "rgba(13, 148, 136, 0.18)",
+              border: "1px solid rgba(13, 148, 136, 0.4)",
+              color: "#5eead4",
+              fontSize: "0.8rem",
+              fontWeight: 600,
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.35rem",
+              transition: "all 0.15s ease",
+            }}
+            title="Automatically populate image, stat values, and spec rows from the main catalogue product data"
+          >
+            ⚡ Auto-fill data from catalogue
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function slugify(text: string): string {
+  return text
+    .toString()
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\-]+/g, "")
+    .replace(/\-\-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+}
+
+// ── one field, dispatched by kind ──────────────────────────
+function FieldControl({ field, value, item, onChange, onItemChange }: {
+  field: Field;
+  value: unknown;
+  item: Item;
+  onChange: (v: unknown) => void;
+  /** write a sibling field on the same item (used by "specs" to keep `models` in sync) */
+  onItemChange: (key: string, v: unknown) => void;
+}) {
+  switch (field.kind) {
+    case "text":
+      if (field.key === "name" || field.key === "title") {
+        return (
+          <input
+            style={inputStyle}
+            value={(value as string) ?? ""}
+            onChange={e => {
+              const val = e.target.value;
+              onChange(val);
+              const currentSlug = String(item.slug ?? "");
+              const currentName = String(item.name || item.title || "");
+              if (val && (!currentSlug || item.isNew || currentSlug === slugify(currentName) || currentSlug === "new-machine" || currentSlug === "new-article" || currentSlug === "new-product")) {
+                onItemChange("slug", slugify(val));
+              }
+            }}
+          />
+        );
+      }
+      if (field.key === "slug") {
+        return (
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              value={(value as string) ?? ""}
+              onChange={e => onChange(e.target.value)}
+            />
+            <button
+              type="button"
+              style={{ ...smallBtn, padding: "0.4rem 0.75rem", fontSize: "0.78rem", whiteSpace: "nowrap" }}
+              onClick={() => {
+                const title = String(item.name || item.title || item.series || "");
+                if (title) {
+                  onChange(slugify(title));
+                }
+              }}
+              title="Auto-generate slug from title"
+            >
+              ⚡ Sync from Title
+            </button>
+          </div>
+        );
+      }
+      return <input style={inputStyle} value={(value as string) ?? ""} onChange={e => onChange(e.target.value)} />;
+    case "textarea":
+      return <textarea style={{ ...inputStyle, minHeight: 90, resize: "vertical" }} value={(value as string) ?? ""} onChange={e => onChange(e.target.value)} />;
+    case "number":
+      return <input style={inputStyle} type="number" value={(value as number) ?? 0} onChange={e => onChange(Number(e.target.value))} />;
+    case "boolean":
+      return (
+        <label style={{ display: "inline-flex", alignItems: "center", gap: "0.6rem", cursor: "pointer" }}>
+          <input type="checkbox" checked={Boolean(value)} onChange={e => onChange(e.target.checked)} style={{ width: 20, height: 20 }} />
+          <span style={{ fontFamily: "var(--ff-body)", fontSize: "0.95rem", color: "#fff" }}>{Boolean(value) ? "On" : "Off"}</span>
+        </label>
+      );
+    case "select":
+      return (
+        <select style={{ ...inputStyle, appearance: "auto" }} value={(value as string) ?? ""} onChange={e => onChange(e.target.value)}>
+          {(field.options ?? []).map(o => <option key={o} value={o} style={{ color: "#e0e0e0", background: "#111" }}>{o}</option>)}
+        </select>
+      );
+    case "productSelect":
+      return (
+        <ProductSelectField
+          value={(value as string) ?? ""}
+          onChange={onChange}
+          onItemChange={onItemChange}
+          item={item}
+        />
+      );
+    case "image":
+      return <ImageField value={(value as string) ?? ""} onChange={onChange} />;
+    case "images":
+      return <ImagesField value={(value as string[]) ?? []} onChange={onChange} />;
+    case "stringlist": {
+      const list = (value as string[]) ?? [];
+      return (
+        <textarea
+          style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
+          value={list.join("\n")}
+          onChange={e => onChange(e.target.value.split("\n"))}
+          onBlur={e => onChange(e.target.value.split("\n").map(s => s.trim()).filter(Boolean))}
+          placeholder="one per line"
+        />
+      );
+    }
+    case "pairs": {
+      const rows = (value as [string, string][]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: "0.5rem" }}>
+              <input style={{ ...inputStyle, flex: 1 }} value={r[0]} placeholder="Label"
+                onChange={e => { const n = rows.map(x => [...x] as [string, string]); n[i][0] = e.target.value; onChange(n); }} />
+              <input style={{ ...inputStyle, flex: 1 }} value={r[1]} placeholder="Value"
+                onChange={e => { const n = rows.map(x => [...x] as [string, string]); n[i][1] = e.target.value; onChange(n); }} />
+              <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, ["", ""]])}>+ Add row</button>
+        </div>
+      );
+    }
+    case "kvlist": {
+      const rows = (value as { label: string; value: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: "0.5rem" }}>
+              <input style={{ ...inputStyle, flex: 1 }} value={r.label} placeholder="Label"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].label = e.target.value; onChange(n); }} />
+              <input style={{ ...inputStyle, flex: 1 }} value={r.value} placeholder="Value"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].value = e.target.value; onChange(n); }} />
+              <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { label: "", value: "" }])}>+ Add row</button>
+        </div>
+      );
+    }
+    case "features": {
+      const rows = (value as { head: string; body: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <input style={{ ...inputStyle, flex: 1 }} value={r.head} placeholder="Heading"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].head = e.target.value; onChange(n); }} />
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+              <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} value={r.body} placeholder="Body"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].body = e.target.value; onChange(n); }} />
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { head: "", body: "" }])}>+ Add feature</button>
+        </div>
+      );
+    }
+    case "specs": {
+      // {label, values[]}[] — values[] is positionally aligned to item.models[].
+      // Model columns are edited right here (not via the separate "models"
+      // text field) so adding/renaming/removing a column always keeps every
+      // row's values[] in sync by splicing at the same index — never a
+      // free-form re-type of `models` that could silently misalign existing
+      // values against the wrong column.
+      const models = (item.models as string[]) ?? [];
+      const rows = (value as { label: string; values: string[] }[]) ?? [];
+
+      const setModelName = (mi: number, name: string) => {
+        const nm = models.map((m, j) => (j === mi ? name : m));
+        onItemChange("models", nm);
+      };
+      const addModel = () => {
+        onItemChange("models", [...models, `Model-${models.length + 1}`]);
+        onChange(rows.map(r => ({ ...r, values: [...r.values, ""] })));
+      };
+      const removeModel = (mi: number) => {
+        onItemChange("models", models.filter((_, j) => j !== mi));
+        onChange(rows.map(r => ({ ...r, values: r.values.filter((_, j) => j !== mi) })));
+      };
+
+      return (
+        <div style={{ overflowX: "auto", borderRadius: 12, background: "rgba(255,255,255,0.03)", padding: "1rem" }}>
+          <table style={{ borderCollapse: "separate", borderSpacing: "0.4rem", width: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ ...hintStyle, fontWeight: 700, color: "var(--brand-teal)", textAlign: "left", padding: "0.3rem 0.4rem" }}>Spec</th>
+                {models.map((m, mi) => (
+                  <th key={mi} style={{ padding: "0.2rem 0.3rem", minWidth: 150 }}>
+                    <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                      <input style={{ ...inputStyle, fontWeight: 700, color: "var(--brand-teal)", padding: "0.5rem 0.7rem" }} value={m}
+                        onChange={e => setModelName(mi, e.target.value)} />
+                      <button type="button" title={`Remove ${m || "column"}`} style={{ ...dangerBtn, padding: "0.5rem" }}
+                        onClick={() => { if (confirm(`Remove model column "${m || `#${mi + 1}`}"? This deletes its value from every spec row.`)) removeModel(mi); }}>
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </th>
+                ))}
+                <th style={{ padding: "0.2rem 0.3rem" }}>
+                  <button type="button" style={smallBtn} onClick={addModel}>+ Column</button>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i}>
+                  <td style={{ padding: "0.2rem 0.3rem", minWidth: 160 }}>
+                    <input style={inputStyle} value={r.label}
+                      onChange={e => { const n = rows.map(x => ({ ...x, values: [...x.values] })); n[i].label = e.target.value; onChange(n); }} />
+                  </td>
+                  {models.map((_, mi) => (
+                    <td key={mi} style={{ padding: "0.2rem 0.3rem", minWidth: 130 }}>
+                      <input style={inputStyle} value={r.values[mi] ?? ""}
+                        onChange={e => { const n = rows.map(x => ({ ...x, values: [...x.values] })); n[i].values[mi] = e.target.value; onChange(n); }} />
+                    </td>
+                  ))}
+                  <td style={{ padding: "0.2rem 0.3rem" }}>
+                    <button type="button" style={{ ...dangerBtn, padding: "0.5rem" }} onClick={() => onChange(rows.filter((_, j) => j !== i))}><X size={14} /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button type="button" style={{ ...smallBtn, marginTop: "0.75rem" }}
+            onClick={() => onChange([...rows, { label: "", values: models.map(() => "") }])}>
+            + Add spec row
+          </button>
+        </div>
+      );
+    }
+    case "steps": {
+      // {title, detail, image}[] — numbered installation / setup steps
+      return <StepsEditor value={(value as Step[]) ?? []} onChange={onChange} />;
+    }
+    case "phases": {
+      // {label, duration, detail}[] — delivery/timeline phases
+      const rows = (value as { label: string; duration: string; detail: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                <input style={{ ...inputStyle, flex: 2, minWidth: 160 }} value={r.label} placeholder="Phase (e.g. Production)"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].label = e.target.value; onChange(n); }} />
+                <input style={{ ...inputStyle, flex: 1, minWidth: 140 }} value={r.duration} placeholder="Duration (e.g. 25–30 days)"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].duration = e.target.value; onChange(n); }} />
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+              <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} value={r.detail} placeholder="What happens in this phase"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].detail = e.target.value; onChange(n); }} />
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { label: "", duration: "", detail: "" }])}>+ Add phase</button>
+        </div>
+      );
+    }
+    case "gallery": {
+      // {src, caption}[] — real site / installation / delivery photos
+      const rows = (value as { src: string; caption: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}>
+                  <ImageField value={r.src} onChange={v => { const n = rows.map(x => ({ ...x })); n[i].src = v; onChange(n); }} />
+                </div>
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+              <input style={inputStyle} value={r.caption} placeholder="Caption"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].caption = e.target.value; onChange(n); }} />
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { src: "", caption: "" }])}>+ Add photo</button>
+        </div>
+      );
+    }
+    case "videos": {
+      // {url, title}[] — real product demo videos (YouTube link or ID)
+      const rows = (value as { url: string; title: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start" }}>
+                <input style={{ ...inputStyle, flex: 1 }} value={r.url} placeholder="YouTube URL or video ID"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].url = e.target.value; onChange(n); }} />
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+              <input style={inputStyle} value={r.title} placeholder="Video title (e.g. Live Production Run)"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].title = e.target.value; onChange(n); }} />
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { url: "", title: "" }])}>+ Add video</button>
+        </div>
+      );
+    }
+    case "reviews": {
+      // {name, title, rating, text}[] — only real, collected buyer reviews
+      const rows = (value as { name: string; title: string; rating: number; text: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                <input style={{ ...inputStyle, flex: 2, minWidth: 140 }} value={r.name} placeholder="Reviewer name"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].name = e.target.value; onChange(n); }} />
+                <input style={{ ...inputStyle, flex: 2, minWidth: 160 }} value={r.title} placeholder="Company / role"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].title = e.target.value; onChange(n); }} />
+                <select style={{ ...inputStyle, flex: "0 0 90px" }} value={r.rating || 5}
+                  onChange={e => { const n = rows.map(x => ({ ...x })); n[i].rating = Number(e.target.value); onChange(n); }}>
+                  {[5, 4, 3, 2, 1].map(v => <option key={v} value={v} style={{ color: "#e0e0e0", background: "#111" }}>{v} star{v === 1 ? "" : "s"}</option>)}
+                </select>
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+              <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={r.text} placeholder="What the buyer said"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].text = e.target.value; onChange(n); }} />
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { name: "", title: "", rating: 5, text: "" }])}>+ Add review</button>
+        </div>
+      );
+    }
+    case "stagePhotos": {
+      // {packing?, freight?, install?: string[]} — 3 fixed delivery-stage
+      // proof photo galleries. Older data may still hold a single string per
+      // stage — normalize to an array so existing saves keep working.
+      const v = (value as Record<"packing" | "freight" | "install", string | string[] | undefined>) ?? {};
+      const toArray = (x: string | string[] | undefined): string[] => (Array.isArray(x) ? x : x ? [x] : []);
+      const STAGES: { key: "packing" | "freight" | "install"; label: string }[] = [
+        { key: "packing", label: "Export Packing — crated / palletized machine" },
+        { key: "freight", label: "Ocean / Air Freight — container loading" },
+        { key: "install", label: "On-Site Install — commissioning at buyer's site" },
+      ];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+          {STAGES.map(s => (
+            <div key={s.key} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <span style={{ ...label, fontSize: "0.85rem" }}>{s.label}</span>
+              <ImagesField value={toArray(v[s.key])} onChange={val => onChange({ ...v, [s.key]: val })} />
+            </div>
+          ))}
+        </div>
+      );
+    }
+    case "customSections": {
+      // discriminated union — {kind, title, image?, text?, imageSide?, photos?}[].
+      // Admins pick a kind, then only the fields that template uses appear.
+      type Row = {
+        kind: "banner" | "text" | "split" | "gallery";
+        title: string;
+        image?: string;
+        text?: string;
+        imageSide?: "left" | "right";
+        photos?: { src: string; caption: string }[];
+      };
+      const rows = (value as Row[]) ?? [];
+      const KIND_LABEL: Record<Row["kind"], string> = {
+        banner: "Full-width image banner",
+        text: "Title + text only",
+        split: "Image + title + text (side by side)",
+        gallery: "Photo grid with captions",
+      };
+      const move = (i: number, dir: -1 | 1) => {
+        const j = i + dir;
+        if (j < 0 || j >= rows.length) return;
+        const n = rows.map(x => ({ ...x }));
+        [n[i], n[j]] = [n[j], n[i]];
+        onChange(n);
+      };
+      const patch = (i: number, p: Partial<Row>) => {
+        const n = rows.map(x => ({ ...x }));
+        n[i] = { ...n[i], ...p };
+        onChange(n);
+      };
+      // inline validation per section
+      const sectionWarnings = (r: Row, i: number) => {
+        const w: { field: string; msg: string; err: boolean }[] = [];
+        if ((r.kind === "banner" || r.kind === "split") && !r.title?.trim()) {
+          w.push({ field: "title", msg: "Title required — section won't appear on site", err: true });
+        }
+        if ((r.kind === "banner" || r.kind === "split") && !r.image?.trim()) {
+          w.push({ field: "image", msg: "No image uploaded", err: false });
+        }
+        if (r.kind === "split" && !r.text?.trim()) {
+          w.push({ field: "text", msg: "No body text — only title will show", err: false });
+        }
+        if (r.kind === "gallery" && (!r.photos || r.photos.filter(p => p.src).length === 0)) {
+          w.push({ field: "photos", msg: "Gallery has no photos — won't appear on site", err: true });
+        }
+        return w;
+      };
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+          {rows.map((r, i) => {
+            const warnings = sectionWarnings(r, i);
+            const hasError = warnings.some(w => w.err);
+            return (
+              <div key={i} style={{
+                borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "1rem",
+                display: "flex", flexDirection: "column", gap: "0.75rem",
+                border: hasError ? "1px solid rgba(255,107,125,0.35)" : warnings.length > 0 ? "1px solid rgba(245,196,81,0.3)" : "1px solid rgba(255,255,255,0.08)",
+              }}>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                  <select style={{ ...inputStyle, flex: "0 0 260px" }} value={r.kind}
+                    onChange={e => patch(i, { kind: e.target.value as Row["kind"] })}>
+                    {(Object.keys(KIND_LABEL) as Row["kind"][]).map(k => <option key={k} value={k} style={{ color: "#e0e0e0", background: "#111" }}>{KIND_LABEL[k]}</option>)}
+                  </select>
+                  <div style={{ flex: 1 }} />
+                  <button type="button" title="Move up" style={iconBtn} disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
+                  <button type="button" title="Move down" style={iconBtn} disabled={i === rows.length - 1} onClick={() => move(i, 1)}>↓</button>
+                  <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove section</button>
+                </div>
+
+                <input style={{
+                  ...inputStyle,
+                  borderColor: (r.kind === "banner" || r.kind === "split") && !r.title?.trim() ? "rgba(255,107,125,0.5)" : undefined,
+                }} value={r.title} placeholder="Section title (required for banner/split)"
+                  onChange={e => patch(i, { title: e.target.value })} />
+                {(r.kind === "banner" || r.kind === "split") && !r.title?.trim() && (
+                  <FieldWarning msg="Title required — section won't appear on the live site" />
+                )}
+
+                {(r.kind === "banner" || r.kind === "split") && (
+                  <div>
+                    <span style={{ ...hintStyle, display: "block", marginBottom: "0.35rem" }}>Image</span>
+                    <ImageField value={r.image ?? ""} onChange={v => patch(i, { image: v })} />
+                    {!r.image?.trim() && (
+                      <FieldWarning msg="No image uploaded — section may look empty" />
+                    )}
+                  </div>
+                )}
+
+                {r.kind === "split" && (
+                  <div style={{ display: "flex", gap: "1.25rem", alignItems: "center" }}>
+                    <span style={{ ...hintStyle }}>Image side:</span>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                      <input type="radio" checked={(r.imageSide ?? "left") === "left"} onChange={() => patch(i, { imageSide: "left" })} />
+                      <span style={{ ...hintStyle, color: "rgba(255,255,255,0.8)" }}>Left</span>
+                    </label>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                      <input type="radio" checked={r.imageSide === "right"} onChange={() => patch(i, { imageSide: "right" })} />
+                      <span style={{ ...hintStyle, color: "rgba(255,255,255,0.8)" }}>Right</span>
+                    </label>
+                  </div>
+                )}
+
+                {(r.kind === "text" || r.kind === "split" || r.kind === "banner") && (
+                  <textarea style={{ ...inputStyle, minHeight: 90, resize: "vertical" }}
+                    value={r.text ?? ""} placeholder={r.kind === "banner" ? "Caption text (optional)" : "Body text"}
+                    onChange={e => patch(i, { text: e.target.value })} />
+                )}
+
+                {r.kind === "gallery" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                    {(r.photos ?? []).map((p, pi) => (
+                      <div key={pi} style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start" }}>
+                        <div style={{ flex: 1 }}>
+                          <ImageField value={p.src} onChange={v => {
+                            const photos = (r.photos ?? []).map(x => ({ ...x }));
+                            photos[pi].src = v;
+                            patch(i, { photos });
+                          }} />
+                          <input style={{ ...inputStyle, marginTop: "0.5rem" }} value={p.caption} placeholder="Caption"
+                            onChange={e => {
+                              const photos = (r.photos ?? []).map(x => ({ ...x }));
+                              photos[pi].caption = e.target.value;
+                              patch(i, { photos });
+                            }} />
+                        </div>
+                        <button type="button" style={dangerBtn} onClick={() => patch(i, { photos: (r.photos ?? []).filter((_, j) => j !== pi) })}>Remove</button>
+                      </div>
+                    ))}
+                    <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }}
+                      onClick={() => patch(i, { photos: [...(r.photos ?? []), { src: "", caption: "" }] })}>+ Add photo</button>
+                  </div>
+                )}
+
+                {/* inline warnings */}
+                {warnings.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", marginTop: "0.25rem" }}>
+                    {warnings.map((w, wi) => (
+                      <div key={wi} style={{
+                        display: "flex", alignItems: "center", gap: "0.4rem",
+                        fontFamily: "var(--ff-body)", fontSize: "0.78rem", fontWeight: 600,
+                        color: w.err ? "#ff8a97" : "#f5c451",
+                      }}>
+                        <AlertTriangle size={12} /> {w.msg}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }}
+            onClick={() => onChange([...rows, { kind: "banner", title: "", image: "", text: "" }])}>+ Add section</button>
+        </div>
+      );
+    }
+    case "parts": {
+      // {name, detail, images?, installation?}[] — real machine parts/components.
+      // Each part can carry its own optional install-step sequence, only shown
+      // on the product page when that part actually has steps.
+      type Part = { name: string; detail: string; images?: string[]; installation?: Step[] };
+      const rows = (value as Part[]) ?? [];
+      const patch = (i: number, p: Partial<Part>) => {
+        const n = rows.map(x => ({ ...x }));
+        n[i] = { ...n[i], ...p };
+        onChange(n);
+      };
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "1rem", display: "flex", flexDirection: "column", gap: "0.75rem", border: "1px solid rgba(255,255,255,0.08)" }}>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <input style={{ ...inputStyle, flex: 1 }} value={r.name} placeholder="Part name (e.g. Die Head Assembly)"
+                  onChange={e => patch(i, { name: e.target.value })} />
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove part</button>
+              </div>
+              <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={r.detail} placeholder="What this part is / does"
+                onChange={e => patch(i, { detail: e.target.value })} />
+              <div>
+                <span style={{ ...hintStyle, display: "block", marginBottom: "0.35rem" }}>Part photos (upload as many as you like)</span>
+                <ImagesField value={r.images ?? []} onChange={v => patch(i, { images: v })} />
+              </div>
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "0.75rem" }}>
+                <span style={{ ...label, fontSize: "0.85rem", display: "block", marginBottom: "0.6rem" }}>Install steps for this part (optional — only add if this part needs its own sequence)</span>
+                <StepsEditor value={r.installation ?? []} onChange={v => patch(i, { installation: v })} />
+              </div>
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }}
+            onClick={() => onChange([...rows, { name: "", detail: "", images: [], installation: [] }])}>+ Add part</button>
+        </div>
+      );
+    }
+    case "links": {
+      const rows = (value as { label: string; url: string }[]) ?? [];
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: "0.5rem" }}>
+              <input style={{ ...inputStyle, flex: 1 }} value={r.label} placeholder="Link text (e.g. Full specification)"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].label = e.target.value; onChange(n); }} />
+              <input style={{ ...inputStyle, flex: 1 }} value={r.url} placeholder="/products/... or https://…"
+                onChange={e => { const n = rows.map(x => ({ ...x })); n[i].url = e.target.value; onChange(n); }} />
+              <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => onChange([...rows, { label: "", url: "" }])}>+ Add link</button>
+        </div>
+      );
+    }
+    case "richtext": {
+      // block-based article body — {kind: heading|paragraph|list, text?, items?}[].
+      // Admins compose the article from typed blocks instead of writing HTML;
+      // renderNewsBody() in lib/news.ts turns this into the same p/h3/ul markup
+      // the article page already styles. **bold** is the only inline syntax.
+      type Block =
+        | { kind: "heading"; text: string }
+        | { kind: "paragraph"; text: string }
+        | { kind: "list"; items: string[] };
+      const rows = (value as Block[]) ?? [];
+      const BLOCK_LABEL: Record<Block["kind"], string> = {
+        heading: "Heading",
+        paragraph: "Paragraph",
+        list: "Bullet list",
+      };
+      const move = (i: number, dir: -1 | 1) => {
+        const j = i + dir;
+        if (j < 0 || j >= rows.length) return;
+        const n = rows.map(x => ({ ...x }));
+        [n[i], n[j]] = [n[j], n[i]];
+        onChange(n);
+      };
+      const setKind = (i: number, kind: Block["kind"]) => {
+        const n = rows.map(x => ({ ...x }));
+        n[i] = kind === "list" ? { kind, items: [""] } : { kind, text: "" };
+        onChange(n);
+      };
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rows.map((b, i) => (
+            <div key={i} style={{ borderRadius: 12, background: "rgba(255,255,255,0.04)", padding: "0.9rem", display: "flex", flexDirection: "column", gap: "0.6rem", border: "1px solid rgba(255,255,255,0.08)" }}>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <select style={{ ...inputStyle, flex: "0 0 180px" }} value={b.kind}
+                  onChange={e => setKind(i, e.target.value as Block["kind"])}>
+                  {(Object.keys(BLOCK_LABEL) as Block["kind"][]).map(k => <option key={k} value={k} style={{ color: "#e0e0e0", background: "#111" }}>{BLOCK_LABEL[k]}</option>)}
+                </select>
+                <div style={{ flex: 1 }} />
+                <button type="button" title="Move up" style={iconBtn} disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
+                <button type="button" title="Move down" style={iconBtn} disabled={i === rows.length - 1} onClick={() => move(i, 1)}>↓</button>
+                <button type="button" style={dangerBtn} onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+
+              {b.kind === "heading" && (
+                <input style={inputStyle} value={b.text} placeholder="Heading text"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); (n[i] as Block & { kind: "heading" }).text = e.target.value; onChange(n); }} />
+              )}
+
+              {b.kind === "paragraph" && (
+                <textarea style={{ ...inputStyle, minHeight: 90, resize: "vertical" }} value={b.text} placeholder="Paragraph text — use **bold** for emphasis"
+                  onChange={e => { const n = rows.map(x => ({ ...x })); (n[i] as Block & { kind: "paragraph" }).text = e.target.value; onChange(n); }} />
+              )}
+
+              {b.kind === "list" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                  {b.items.map((item, ii) => (
+                    <div key={ii} style={{ display: "flex", gap: "0.5rem" }}>
+                      <input style={{ ...inputStyle, flex: 1 }} value={item} placeholder="List item — use **bold** for emphasis"
+                        onChange={e => {
+                          const n = rows.map(x => ({ ...x })) as Block[];
+                          const items = [...(n[i] as Block & { kind: "list" }).items];
+                          items[ii] = e.target.value;
+                          (n[i] as Block & { kind: "list" }).items = items;
+                          onChange(n);
+                        }} />
+                      <button type="button" style={dangerBtn} onClick={() => {
+                        const n = rows.map(x => ({ ...x })) as Block[];
+                        (n[i] as Block & { kind: "list" }).items = (n[i] as Block & { kind: "list" }).items.filter((_, j) => j !== ii);
+                        onChange(n);
+                      }}><X size={14} /></button>
+                    </div>
+                  ))}
+                  <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={() => {
+                    const n = rows.map(x => ({ ...x })) as Block[];
+                    (n[i] as Block & { kind: "list" }).items = [...(n[i] as Block & { kind: "list" }).items, ""];
+                    onChange(n);
+                  }}>+ Add item</button>
+                </div>
+              )}
+            </div>
+          ))}
+          <button type="button" style={{ ...smallBtn, alignSelf: "flex-start" }}
+            onClick={() => onChange([...rows, { kind: "paragraph", text: "" }])}>+ Add block</button>
+        </div>
+      );
+    }
+    default:
+      return null;
+  }
+}
+
+// ── fields for one open item — grouped into tabs when the collection
+// declares `groups`, otherwise a plain flat list (unchanged behaviour) ──
+function ItemFieldsPanel({ collection, item, onFieldChange, onFieldItemChange }: {
+  collection: Collection;
+  item: Item;
+  onFieldChange: (key: string, v: unknown) => void;
+  onFieldItemChange: (key: string, v: unknown) => void;
+}) {
+  const groups = collection.groups;
+  const hasGroups = !!groups && groups.length > 0;
+  const [activeGroup, setActiveGroup] = useState(groups?.[0] ?? "");
+
+  const fieldsToShow = hasGroups
+    ? collection.fields.filter(f => (f.group ?? groups![0]) === activeGroup)
+    : collection.fields;
+
+  return (
+    <div>
+      {hasGroups && (
+        <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", padding: "0.9rem 1.25rem 0" }}>
+          {groups!.map(g => (
+            <button key={g} type="button"
+              onClick={() => setActiveGroup(g)}
+              style={{
+                padding: "0.55rem 1rem", borderRadius: 8, border: "none", cursor: "pointer",
+                fontFamily: "var(--ff-body)", fontSize: "0.85rem", fontWeight: 700,
+                background: activeGroup === g ? "var(--brand-teal)" : "rgba(255,255,255,0.06)",
+                color: activeGroup === g ? "#04211e" : "rgba(255,255,255,0.65)",
+                whiteSpace: "nowrap",
+              }}>
+              {g}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ padding: "1.25rem", display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+        {fieldsToShow.map(f => (
+          <label key={f.key} style={{ display: "block" }}>
+            <FieldLabel hint={f.hint}>{f.label}</FieldLabel>
+            <FieldControl field={f} item={item} value={item[f.key]}
+              onChange={v => onFieldChange(f.key, v)}
+              onItemChange={onFieldItemChange} />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const DEFAULT_PRODUCT_CATEGORIES: Item[] = [
+  { slug: "film-blowing", name: "Film Blowing Machines", tagline: "Pellet to film · Blown film lines & co-extrusion towers" },
+  { slug: "bag-making", name: "Bag Making Machines", tagline: "Film to bag · Heat-seal, roll-bag & pouch converters" },
+  { slug: "recycling", name: "Recycling & Lab Lines", tagline: "Scrap to pellet · Pelletizing & closed-loop resin lines" },
+  { slug: "printing", name: "Flexographic Printing Machines", tagline: "Film to print · CI flexographic printing presses" },
+];
+
+// ── distinct category cards — renders each category as a distinct themed card.
+// Clicking a card activates it and renders that category's machines directly below it.
+function DistinctCategoryCards({ categories, items, activeCategory, onSelect }: {
+  categories: Item[];
+  items: Item[];
+  activeCategory: string;
+  onSelect: (slug: string) => void;
+}) {
+  const cats = Array.isArray(categories) && categories.length > 0 ? categories : DEFAULT_PRODUCT_CATEGORIES;
+
+  const categoryTaglines: Record<string, string> = {
+    "film-blowing": "Pellet to film · Blown film lines & co-extrusion towers",
+    "bag-making": "Film to bag · Heat-seal, roll-bag & pouch converters",
+    "recycling": "Scrap to pellet · Pelletizing & closed-loop resin lines",
+    "printing": "Film to print · CI flexographic printing presses",
+  };
+
+  const getThemeClass = (slug: string) => {
+    switch (slug) {
+      case "all": return "adm-cat-card--all";
+      case "film-blowing": return "adm-cat-card--film-blowing";
+      case "bag-making": return "adm-cat-card--bag-making";
+      case "recycling": return "adm-cat-card--recycling";
+      case "printing": return "adm-cat-card--printing";
+      default: return "adm-cat-card--custom";
+    }
+  };
+
+  const isAllActive = activeCategory === "all";
+
+  return (
+    <div className="adm-cat-grid adm-stagger">
+      {/* "All Machines & Products" Distinct Card */}
+      <button
+        type="button"
+        onClick={() => onSelect("all")}
+        className={`adm-cat-card adm-cat-card--all ${isAllActive ? "is-active" : ""}`}
+      >
+        <div>
+          <div className="adm-cat-card__top">
+            <div className="adm-cat-card__icon">
+              <Package size={20} />
+            </div>
+            <div className="adm-cat-card__badge">
+              {items.length} {items.length === 1 ? "Machine" : "Machines"}
+            </div>
+          </div>
+          <h3 className="adm-cat-card__title">All Machines & Products</h3>
+          <p className="adm-cat-card__tagline">
+            Complete machinery catalogue across all manufacturing lines
+          </p>
+        </div>
+        <div className="adm-cat-card__active-indicator" style={{ opacity: isAllActive ? 1 : 0.5 }}>
+          <span>{isAllActive ? "● Active Category" : "Click to view"}</span>
+          <span>{isAllActive ? "Viewing below ↓" : "→"}</span>
+        </div>
+      </button>
+
+      {/* Individual Category Distinct Cards */}
+      {cats.map(cat => {
+        const slug = String(cat.slug ?? "");
+        const count = items.filter(f => f.category === slug).length;
+        const CatIcon = SHARED_CATEGORY_ICON[slug] ?? Package;
+        const isActive = activeCategory === slug;
+        const tagline = String(cat.tagline || categoryTaglines[slug] || cat.blurb || "Machinery category");
+        const themeClass = getThemeClass(slug);
+
+        return (
+          <button
+            key={slug}
+            type="button"
+            onClick={() => onSelect(slug)}
+            className={`adm-cat-card ${themeClass} ${isActive ? "is-active" : ""}`}
+          >
+            <div>
+              <div className="adm-cat-card__top">
+                <div className="adm-cat-card__icon">
+                  <CatIcon size={20} />
+                </div>
+                <div className="adm-cat-card__badge">
+                  {count} {count === 1 ? "Machine" : "Machines"}
+                </div>
+              </div>
+              <h3 className="adm-cat-card__title">{String(cat.name ?? slug)}</h3>
+              <p className="adm-cat-card__tagline">{tagline}</p>
+            </div>
+            <div className="adm-cat-card__active-indicator" style={{ opacity: isActive ? 1 : 0.5 }}>
+              <span>{isActive ? "● Active Category" : "Click to view"}</span>
+              <span>{isActive ? "Viewing below ↓" : "→"}</span>
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── validate custom sections before save ──────────────────
+function validateCustomSections(sections: unknown[]): ValidationWarning[] {
+  const warnings: ValidationWarning[] = [];
+  if (!Array.isArray(sections)) return warnings;
+
+  sections.forEach((s, i) => {
+    const kind = (s as Record<string, unknown>).kind;
+    const title = String((s as Record<string, unknown>).title ?? "").trim();
+    const image = String((s as Record<string, unknown>).image ?? "").trim();
+    const text = String((s as Record<string, unknown>).text ?? "").trim();
+    const photos = (s as Record<string, unknown>).photos as { src: string }[] | undefined;
+
+    const sectionLabel = `Section ${i + 1} (${kind || "unknown"})`;
+
+    if (kind === "banner" || kind === "split") {
+      if (!title) {
+        warnings.push({
+          field: `${sectionLabel} — Title`,
+          message: `This ${kind} section has no title. It will NOT appear on the live site without a title.`,
+          severity: "error",
+        });
+      }
+      if (!image) {
+        warnings.push({
+          field: `${sectionLabel} — Image`,
+          message: `This ${kind} section has no image. ${kind === "banner" ? "The banner will look empty." : "The split section will have a blank area."}`,
+          severity: "warning",
+        });
+      }
+    }
+
+    if (kind === "split" && !text) {
+      warnings.push({
+        field: `${sectionLabel} — Body text`,
+        message: "This split section has no body text. Only the title will show.",
+        severity: "warning",
+      });
+    }
+
+    if (kind === "gallery") {
+      const validPhotos = (photos ?? []).filter(p => p.src);
+      if (validPhotos.length === 0) {
+        warnings.push({
+          field: `${sectionLabel} — Photos`,
+          message: "This gallery has no uploaded photos. It will be invisible on the live site.",
+          severity: "error",
+        });
+      }
+    }
+  });
+
+  return warnings;
+}
+
+// ── validate product family before save ───────────────────
+function validateFamily(item: Item): ValidationWarning[] {
+  const warnings: ValidationWarning[] = [];
+  const name = String(item.name ?? "").trim();
+  const slug = String(item.slug ?? "").trim();
+  const images = item.images as string[] | undefined;
+
+  if (!name) {
+    warnings.push({ field: "Product name", message: "Product has no name. It will be hard to identify.", severity: "warning" });
+  }
+  if (!slug) {
+    warnings.push({ field: "Slug", message: "Product has no URL slug. The page link won't work.", severity: "error" });
+  }
+  if (!images || images.length === 0) {
+    warnings.push({ field: "Product photos", message: "No product photos uploaded. The product will show a fallback image.", severity: "warning" });
+  }
+
+  // validate custom sections within this family
+  const cs = item.customSections;
+  if (Array.isArray(cs) && cs.length > 0) {
+    warnings.push(...validateCustomSections(cs));
+  }
+
+  return warnings;
+}
+
+// ── validate all data before section-level save ───────────
+function validateSectionData(data: Json, schema: SectionSchema): ValidationWarning[] {
+  const warnings: ValidationWarning[] = [];
+
+  for (const col of schema.collections) {
+    const items = data[col.key] as Item[] | undefined;
+    if (!items || !Array.isArray(items)) continue;
+
+    items.forEach((item, i) => {
+      if (col.key === "families") {
+        const familyWarnings = validateFamily(item);
+        // prefix with product name for context
+        const productName = String(item.name ?? item.series ?? `#${i + 1}`);
+        familyWarnings.forEach(w => {
+          w.field = `[${productName}] ${w.field}`;
+          warnings.push(w);
+        });
+      }
+    });
+  }
+
+  return warnings;
+}
+
+// ── full page item editor ──────────────────────────────────
+// Dedicated full-page workspace for editing a machine / product item.
+function FullPageItemEditor({
+  item,
+  index,
+  collection,
+  allCategories,
+  onBack,
+  onSave,
+  onFieldChange,
+  onFieldItemChange,
+  status,
+  photos,
+}: {
+  photos: ProductImageMap;
+  item: Item;
+  index: number;
+  collection: Collection;
+  allCategories: Item[];
+  onBack: () => void;
+  onSave: () => void;
+  onFieldChange: (key: string, v: unknown) => void;
+  onFieldItemChange: (key: string, v: unknown) => void;
+  status: "idle" | "dirty" | "saving" | "saved" | "error";
+}) {
+  const [dirty, setDirty] = useState(false);
+
+  const handleChange = useCallback((key: string, v: unknown) => {
+    setDirty(true);
+    onFieldChange(key, v);
+  }, [onFieldChange]);
+
+  const handleItemChange = useCallback((key: string, v: unknown) => {
+    setDirty(true);
+    onFieldItemChange(key, v);
+  }, [onFieldItemChange]);
+
+  const imgUrl = itemImage(item, photos);
+
+  const titleText = String(item.name || item.series || item.label || item.slug || `Item #${index + 1}`);
+  const statVal = item.stat ? String(item.stat) : (item.speed ? `${item.speed} m/min` : "");
+  const statLabel = item.label ? String(item.label) : (item.stat ? "Max Rating" : "");
+  const specsArr = Array.isArray(item.specs) ? item.specs : [];
+
+  const catObj = allCategories.find(c => c.slug === item.category);
+  const categoryName = catObj ? String(catObj.name ?? item.category) : String(item.category ?? "");
+  const warnings = collection.key === "families" ? validateFamily(item) : [];
+  const livePageUrl = item.slug && item.category ? `/products/${item.category}/${item.slug}` : "";
+
+  return (
+    <div className="adm-fullpage-editor adm-rise">
+      {/* Top Sticky Navigation & Action Bar */}
+      <div className="adm-fullpage-editor__topbar">
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => {
+              if (dirty && !confirm("You have unsaved changes. Discard?")) return;
+              onBack();
+            }}
+            className="adm-btn-secondary"
+            style={{ padding: "0.5rem 0.9rem", fontSize: "0.85rem", gap: "0.4rem" }}
+          >
+            <ArrowLeft size={16} /> Back to Products
+          </button>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", color: "var(--adm-text-sub)" }}>
+            <span style={{ color: "rgba(255,255,255,0.4)" }}>Catalogue</span>
+            <span>/</span>
+            {categoryName && (
+              <>
+                <span style={{ color: "var(--brand-teal)", fontWeight: 600 }}>{categoryName}</span>
+                <span>/</span>
+              </>
+            )}
+            <span style={{ color: "#fff", fontWeight: 700, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {titleText}
+            </span>
+          </div>
+
+          {dirty && (
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.78rem",
+              color: "#f5c451", fontWeight: 700, background: "rgba(245,196,81,0.12)",
+              padding: "0.2rem 0.65rem", borderRadius: 20, border: "1px solid rgba(245,196,81,0.3)"
+            }}>
+              ● Unsaved Changes
+            </span>
+          )}
+          {status === "saved" && !dirty && (
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.78rem",
+              color: "var(--brand-teal)", fontWeight: 700, background: "rgba(0,210,148,0.12)",
+              padding: "0.2rem 0.65rem", borderRadius: 20, border: "1px solid rgba(0,210,148,0.3)"
+            }}>
+              <CheckCircle2 size={13} /> Saved
+            </span>
+          )}
+          {Boolean(item.isNew) && (
+            <span className="new-machine-alert-badge" style={{ fontSize: "0.72rem" }}>⚡ NEW MACHINE</span>
+          )}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+          {livePageUrl && (
+            <a
+              href={livePageUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="adm-btn-secondary"
+              style={{ textDecoration: "none", padding: "0.5rem 0.85rem", fontSize: "0.82rem", color: "#5eead4", borderColor: "rgba(45,212,191,0.3)" }}
+            >
+              <ExternalLink size={14} /> View Live Page ↗
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={() => { setDirty(false); onSave(); }}
+            disabled={status === "saving"}
+            className="adm-btn"
+            style={{ padding: "0.55rem 1.25rem", fontSize: "0.88rem" }}
+          >
+            {status === "saving" ? <Loader2 size={16} className="adm-spin-icon" /> : <CheckCircle2 size={16} />}
+            {status === "saving" ? "Saving..." : "Save Product (Ctrl+S)"}
+          </button>
+        </div>
+      </div>
+
+      {/* Main Workspace (2-column layout) */}
+      <div className="adm-fullpage-editor__workspace">
+        {/* Left: Complete Form Controls */}
+        <div className="adm-fullpage-editor__main">
+          <div style={{
+            padding: "1.25rem 1.5rem", borderBottom: "1px solid rgba(255,255,255,0.08)",
+            background: "rgba(255,255,255,0.02)", display: "flex", alignItems: "center",
+            justifyContent: "space-between", flexWrap: "wrap", gap: "1rem"
+          }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.2rem" }}>
+                <span style={{
+                  fontSize: "0.72rem", fontFamily: "var(--ff-mono)", color: "var(--brand-teal)",
+                  background: "rgba(43,191,179,0.12)", padding: "0.15rem 0.5rem", borderRadius: 6
+                }}>
+                  {String(item.category || collection.singular || "PRODUCT")}
+                </span>
+                <span style={{ fontSize: "0.75rem", color: "var(--adm-text-sub)" }}>
+                  Slug: {String(item.slug || "not-set")}
+                </span>
+              </div>
+              <h2 style={{ fontFamily: "var(--ff-display)", fontSize: "1.45rem", color: "#fff", margin: 0, lineHeight: 1.2 }}>
+                {titleText}
+              </h2>
+            </div>
+            {warnings.length > 0 && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: "0.4rem",
+                background: "rgba(245,196,81,0.12)", border: "1px solid rgba(245,196,81,0.3)",
+                padding: "0.35rem 0.75rem", borderRadius: 8, fontSize: "0.78rem", color: "#f5c451", fontWeight: 600
+              }}>
+                <AlertTriangle size={14} />
+                {warnings.length} {warnings.length === 1 ? "issue to review" : "issues to review"}
+              </div>
+            )}
+          </div>
+
+          <ItemFieldsPanel
+            collection={collection}
+            item={item}
+            onFieldChange={handleChange}
+            onFieldItemChange={handleItemChange}
+          />
+        </div>
+
+        {/* Right: Sticky Inspector & Live Machine Card Preview */}
+        <div className="adm-fullpage-editor__sidebar">
+          {/* Live Card Preview */}
+          <div style={{
+            background: "#121b2d", border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: 18, padding: "1.25rem", boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+            display: "flex", flexDirection: "column", gap: "1rem"
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{
+                fontSize: "0.72rem", fontWeight: 800, color: "var(--brand-teal)",
+                letterSpacing: "0.1em", textTransform: "uppercase",
+                display: "inline-flex", alignItems: "center", gap: "0.35rem"
+              }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#2dd4bf", boxShadow: "0 0 10px #2dd4bf" }} />
+                Live Card Preview
+              </span>
+              <span style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.4)" }}>Real-time</span>
+            </div>
+
+            {/* Product Card Container */}
+            <div style={{
+              background: "#162338", border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 16, overflow: "hidden", padding: "1.1rem",
+              display: "flex", flexDirection: "column", gap: "0.85rem",
+            }}>
+              {Boolean(imgUrl) ? (
+                <div style={{
+                  position: "relative", width: "100%", height: 180, borderRadius: 12,
+                  overflow: "hidden", background: "radial-gradient(circle, rgba(13,148,136,0.15) 0%, rgba(0,0,0,0.4) 100%)",
+                  border: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "center", padding: "0.5rem"
+                }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={imgUrl}
+                    alt={titleText}
+                    style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", filter: "drop-shadow(0 10px 20px rgba(0,0,0,0.6))" }}
+                  />
+                </div>
+              ) : (
+                <div style={{
+                  width: "100%", height: 140, borderRadius: 12, background: "rgba(255,255,255,0.03)",
+                  border: "1px dashed rgba(255,255,255,0.15)", display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,0.35)", fontSize: "0.85rem", gap: "0.5rem"
+                }}>
+                  <Camera size={26} />
+                  <span>No Machine Image Set</span>
+                </div>
+              )}
+
+              <div>
+                <div style={{ fontFamily: "var(--ff-mono)", fontSize: "0.68rem", color: "var(--brand-teal)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: "0.2rem" }}>
+                  {String(item.category || item.series || "MACHINE MODEL")}
+                </div>
+                <h4 style={{ fontFamily: "var(--ff-display)", fontSize: "1.15rem", color: "#fff", margin: "0 0 0.35rem", lineHeight: 1.25 }}>
+                  {titleText}
+                </h4>
+                {Boolean(item.tagline) && (
+                  <p style={{ margin: 0, fontSize: "0.78rem", color: "rgba(255,255,255,0.6)", lineHeight: 1.4 }}>
+                    {String(item.tagline)}
+                  </p>
+                )}
+                {Boolean(statVal) && (
+                  <div style={{ display: "inline-flex", flexDirection: "column", background: "rgba(13,148,136,0.15)", border: "1px solid rgba(13,148,136,0.3)", padding: "0.35rem 0.75rem", borderRadius: 8, marginTop: "0.5rem" }}>
+                    <span style={{ fontSize: "1.05rem", fontWeight: 800, color: "#5eead4", lineHeight: 1.1 }}>{statVal}</span>
+                    {statLabel && <span style={{ fontSize: "0.65rem", color: "rgba(255,255,255,0.6)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{statLabel}</span>}
+                  </div>
+                )}
+              </div>
+
+              {/* Spec Rows Preview */}
+              {specsArr.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", background: "rgba(0,0,0,0.25)", padding: "0.75rem", borderRadius: 10, border: "1px solid rgba(255,255,255,0.06)" }}>
+                  <div style={{ fontSize: "0.68rem", fontWeight: 700, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.15rem" }}>
+                    Technical Specifications
+                  </div>
+                  {specsArr.slice(0, 4).map((s: any, idx: number) => (
+                    <div key={idx} style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", borderBottom: idx < specsArr.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none", paddingBottom: "0.15rem" }}>
+                      <span style={{ color: "rgba(255,255,255,0.5)" }}>{s.label}</span>
+                      <strong style={{ color: "#fff" }}>{Array.isArray(s.values) ? s.values.join(" / ") : String(s.value || s.values || "")}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Quality Checklist */}
+          <div style={{
+            background: "#121b2d", border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 18, padding: "1.25rem", display: "flex", flexDirection: "column", gap: "0.75rem"
+          }}>
+            <h4 style={{ margin: 0, fontSize: "0.85rem", fontWeight: 700, color: "#fff", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+              <Sparkles size={14} color="var(--brand-teal)" /> Quality Checklist
+            </h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", fontSize: "0.78rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: item.name ? "rgba(255,255,255,0.85)" : "#ff8a97" }}>
+                {item.name ? <CheckCircle2 size={13} color="#2dd4bf" /> : <AlertTriangle size={13} color="#ff8a97" />}
+                <span>Product Name {item.name ? "configured" : "is missing"}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: item.slug ? "rgba(255,255,255,0.85)" : "#ff8a97" }}>
+                {item.slug ? <CheckCircle2 size={13} color="#2dd4bf" /> : <AlertTriangle size={13} color="#ff8a97" />}
+                <span>URL Slug {item.slug ? `(/${item.slug})` : "is missing"}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: imgUrl ? "rgba(255,255,255,0.85)" : "#f5c451" }}>
+                {imgUrl ? <CheckCircle2 size={13} color="#2dd4bf" /> : <AlertTriangle size={13} color="#f5c451" />}
+                <span>Primary Photo {imgUrl ? "uploaded" : "recommended"}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: specsArr.length > 0 ? "rgba(255,255,255,0.85)" : "#f5c451" }}>
+                {specsArr.length > 0 ? <CheckCircle2 size={13} color="#2dd4bf" /> : <AlertTriangle size={13} color="#f5c451" />}
+                <span>Spec Table ({specsArr.length} specs)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── main editor ────────────────────────────────────────────
+export default function Editor({ schema }: { schema: SectionSchema }) {
+  const searchParams = useSearchParams();
+  const editSlug = searchParams?.get("edit");
+  const catParam = searchParams?.get("category");
+
+  const [data, setData] = useState<Json | null>(null);
+  const [status, setStatus] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle");
+  const [errMsg, setErrMsg] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string>("all");
+  const [filterQuery, setFilterQuery] = useState("");
+  const [filterType, setFilterType] = useState<"all" | "complete" | "warnings" | "has_image">("all");
+
+  // validation modal state
+  const [pendingWarnings, setPendingWarnings] = useState<ValidationWarning[] | null>(null);
+  const [pendingSaveFn, setPendingSaveFn] = useState<(() => void) | null>(null);
+
+  // full-page product/item editor state (replaces popup modal)
+  const [editingItem, setEditingItem] = useState<{ item: Item; index: number; collection: Collection } | null>(null);
+
+  // live preview card modal state with device switcher
+  const [previewItem, setPreviewItem] = useState<{ item: Item; title: string; index?: number; collection?: Collection } | null>(null);
+  const [previewDevice, setPreviewDevice] = useState<"desktop" | "mobile" | "specs">("desktop");
+  const [previewCopiedSlug, setPreviewCopiedSlug] = useState(false);
+
+  // slug → current main product photo, for thumbnails of items that only
+  // reference a machine (machine-catalog, hero, scroll-story, …)
+  const [fetchedPhotos, setFetchedPhotos] = useState<ProductImageMap>({});
+  useEffect(() => {
+    if (schema.slug === "products") return; // derived from `data` below
+    let alive = true;
+    fetch("/api/admin/data/products")
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => {
+        if (!alive || !Array.isArray(j?.families)) return;
+        const m: ProductImageMap = {};
+        for (const f of j.families) { const img = (f.images ?? []).find((x: string) => x?.trim()) || f.image; if (f.slug && img) m[f.slug] = img; }
+        setFetchedPhotos(m);
+      })
+      .catch(() => { /* thumbnails just fall back to the number badge */ });
+    return () => { alive = false; };
+  }, [schema.slug]);
+  const productPhotos: ProductImageMap = schema.slug === "products" && Array.isArray(data?.families)
+    ? Object.fromEntries((data!.families as Item[]).map(f => [String(f.slug ?? ""), String((Array.isArray(f.images) && f.images[0]) || f.image || "")]).filter(([k, v]) => k && v))
+    : fetchedPhotos;
+  // on the products page, category rows share the slug → photo lookup
+  const listPhotos: ProductImageMap = schema.slug === "products" && Array.isArray(data?.families)
+    ? { ...categoryPhotos(data!.families as Item[], productPhotos), ...productPhotos }
+    : productPhotos;
+
+  // Helper to sync URL params without reload
+  const updateUrlParam = useCallback((key: string, val: string | null) => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (val) {
+      url.searchParams.set(key, val);
+    } else {
+      url.searchParams.delete(key);
+    }
+    window.history.pushState(null, "", url.toString());
+  }, []);
+
+  const handleOpenEdit = useCallback((item: Item, index: number, collection: Collection) => {
+    setEditingItem({ item, index, collection });
+    const slugOrIdx = String(item.slug || index);
+    updateUrlParam("edit", slugOrIdx);
+  }, [updateUrlParam]);
+
+  const handleCloseEdit = useCallback(() => {
+    setEditingItem(null);
+    updateUrlParam("edit", null);
+  }, [updateUrlParam]);
+
+  const handleSelectCategory = useCallback((catSlug: string) => {
+    setActiveCategory(catSlug);
+    updateUrlParam("category", catSlug === "all" ? null : catSlug);
+  }, [updateUrlParam]);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/admin/data/${schema.slug}`)
+      .then(r => r.json())
+      .then(j => { if (alive) setData(j); })
+      .catch(() => { if (alive) { setStatus("error"); setErrMsg("Failed to load section data"); } });
+    return () => { alive = false; };
+  }, [schema.slug]);
+
+  // Sync category from URL param
+  useEffect(() => {
+    if (catParam) {
+      setActiveCategory(catParam);
+    }
+  }, [catParam]);
+
+  // Sync item from URL edit param
+  useEffect(() => {
+    if (editSlug && data && !editingItem) {
+      const primaryCol = schema.collections[0];
+      if (!primaryCol) return;
+      const items = (data[primaryCol.key] as Item[]) ?? [];
+      const foundIdx = items.findIndex(it => String(it.slug ?? "") === editSlug || String(it.name ?? "") === editSlug);
+      if (foundIdx >= 0) {
+        setEditingItem({ item: items[foundIdx], index: foundIdx, collection: primaryCol });
+      } else {
+        const numIdx = parseInt(editSlug, 10);
+        if (!isNaN(numIdx) && items[numIdx]) {
+          setEditingItem({ item: items[numIdx], index: numIdx, collection: primaryCol });
+        }
+      }
+    }
+  }, [editSlug, data, schema.collections, editingItem]);
+
+  // Handle browser back/forward buttons
+  useEffect(() => {
+    const handlePopState = () => {
+      const url = new URL(window.location.href);
+      const eParam = url.searchParams.get("edit");
+      const cParam = url.searchParams.get("category");
+      if (cParam) setActiveCategory(cParam);
+      if (!eParam) {
+        setEditingItem(null);
+      } else if (data) {
+        const primaryCol = schema.collections[0];
+        if (!primaryCol) return;
+        const items = (data[primaryCol.key] as Item[]) ?? [];
+        const foundIdx = items.findIndex(it => String(it.slug ?? "") === eParam);
+        if (foundIdx >= 0) {
+          setEditingItem({ item: items[foundIdx], index: foundIdx, collection: primaryCol });
+        }
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [data, schema.collections]);
+
+  const mutate = useCallback((fn: (d: Json) => Json) => {
+    setData(d => (d ? fn(d) : d));
+    setStatus("dirty");
+  }, []);
+
+  // actual save (called after validation passes)
+  const doSave = useCallback(async () => {
+    if (!data) return;
+    setStatus("saving"); setErrMsg("");
+    try {
+      const res = await fetch(`/api/admin/data/${schema.slug}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error ?? `save failed (${res.status})`);
+      }
+      setStatus("saved");
+      setTimeout(() => setStatus(s => (s === "saved" ? "idle" : s)), 2500);
+    } catch (e) {
+      setStatus("error"); setErrMsg((e as Error).message);
+    }
+  }, [data, schema.slug]);
+
+  // save with validation check
+  const save = useCallback(() => {
+    if (!data) return;
+    const warnings = validateSectionData(data, schema);
+    if (warnings.length > 0) {
+      setPendingWarnings(warnings);
+      setPendingSaveFn(() => doSave);
+    } else {
+      doSave();
+    }
+  }, [data, schema, doSave]);
+
+  // Keyboard shortcut Ctrl+S / Cmd+S
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        save();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [save]);
+
+  if (!data) {
+    if (status === "error") {
+      return <div style={{ fontFamily: "var(--ff-body)", fontSize: "1rem", color: "#ff8a97", padding: "2rem 0" }}>{errMsg}</div>;
+    }
+    return (
+      <div style={{ maxWidth: 1640, width: "100%", margin: "0 auto" }}>
+        <div className="adm-skel" style={{ width: "40%", height: 38, borderRadius: 8, marginBottom: "0.75rem" }} />
+        <div className="adm-skel" style={{ width: "65%", height: 16, borderRadius: 6, marginBottom: "2rem" }} />
+        <div className="adm-skel" style={{ height: 140, borderRadius: 16 }} />
+      </div>
+    );
+  }
+
+  // ── FULL PAGE ITEM EDITOR VIEW ──
+  // If an item is being edited, render it as a dedicated full page instead of a popup box
+  if (editingItem) {
+    return (
+      <div style={{ maxWidth: 1640, width: "100%", margin: "0 auto", position: "relative" }} className="adm-rise">
+        {pendingWarnings && (
+          <WarningModal
+            title="Review before saving"
+            warnings={pendingWarnings}
+            onConfirm={() => { setPendingWarnings(null); pendingSaveFn?.(); }}
+            onCancel={() => { setPendingWarnings(null); setPendingSaveFn(null); }}
+          />
+        )}
+        <FullPageItemEditor
+          item={editingItem.item}
+          index={editingItem.index}
+          collection={editingItem.collection}
+          allCategories={((data.categories as Item[]) || DEFAULT_PRODUCT_CATEGORIES)}
+          onBack={handleCloseEdit}
+          onSave={save}
+          onFieldChange={(key, v) => {
+            mutate(d => {
+              const n = ((d[editingItem.collection.key] as Item[]) ?? []).map(x => ({ ...x }));
+              n[editingItem.index][key] = v;
+              return { ...d, [editingItem.collection.key]: n };
+            });
+            setEditingItem(prev => prev ? { ...prev, item: { ...prev.item, [key]: v } } : null);
+          }}
+          onFieldItemChange={(key, v) => {
+            mutate(d => {
+              const n = ((d[editingItem.collection.key] as Item[]) ?? []).map(x => ({ ...x }));
+              n[editingItem.index][key] = v;
+              return { ...d, [editingItem.collection.key]: n };
+            });
+            setEditingItem(prev => prev ? { ...prev, item: { ...prev.item, [key]: v } } : null);
+          }}
+          status={status}
+          photos={productPhotos}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 1640, width: "100%", margin: "0 auto", position: "relative" }} className="adm-rise">
+      {/* validation warning modal */}
+      {pendingWarnings && (
+        <WarningModal
+          title="Review before saving"
+          warnings={pendingWarnings}
+          onConfirm={() => { setPendingWarnings(null); pendingSaveFn?.(); }}
+          onCancel={() => { setPendingWarnings(null); setPendingSaveFn(null); }}
+        />
+      )}
+
+      {/* Upgraded Live Card Preview Modal with Device Switcher */}
+      {previewItem && (
+        <div className="adm-preview-backdrop" onClick={() => setPreviewItem(null)}>
+          <div
+            className={`adm-preview-dialog ${previewDevice === "mobile" ? "adm-preview-dialog--mobile" : ""}`}
+            onClick={e => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: previewDevice === "mobile" ? 440 : 760 }}
+          >
+            {/* Modal Header */}
+            <div className="adm-preview-header">
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <span style={{ fontSize: "0.85rem", fontWeight: 800, color: "var(--adm-mint)", textTransform: "uppercase", letterSpacing: "0.06em", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                  <Eye size={16} /> Live Preview
+                </span>
+                <span style={{ fontSize: "0.75rem", color: "var(--adm-text-sub)", background: "rgba(255,255,255,0.06)", padding: "0.15rem 0.5rem", borderRadius: 6 }}>
+                  {String(previewItem.item.category || schema.slug)}
+                </span>
+              </div>
+
+              {/* Device Mode Switcher */}
+              <div className="adm-preview-device-switch">
+                <button
+                  type="button"
+                  onClick={() => setPreviewDevice("desktop")}
+                  className={`adm-preview-device-btn ${previewDevice === "desktop" ? "is-active" : ""}`}
+                  title="Desktop Card View"
+                >
+                  <Monitor size={14} /> Desktop Card
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewDevice("mobile")}
+                  className={`adm-preview-device-btn ${previewDevice === "mobile" ? "is-active" : ""}`}
+                  title="Mobile 2-Column Catalog View"
+                >
+                  <Smartphone size={14} /> Mobile Phone
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewDevice("specs")}
+                  className={`adm-preview-device-btn ${previewDevice === "specs" ? "is-active" : ""}`}
+                  title="Full Spec Sheet"
+                >
+                  <FileSpreadsheet size={14} /> Specs Sheet
+                </button>
+              </div>
+
+              <button
+                onClick={() => setPreviewItem(null)}
+                style={{ background: "none", border: "none", color: "rgba(255,255,255,0.6)", cursor: "pointer", padding: "0.3rem" }}
+                aria-label="Close Preview"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="adm-preview-body">
+              {previewDevice === "desktop" && (
+                <div style={{
+                  background: "#121b2d", border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 20, overflow: "hidden", padding: "1.5rem",
+                  boxShadow: "0 20px 50px rgba(0,0,0,0.6)"
+                }}>
+                  {/* High-res Image Stage */}
+                  <div style={{
+                    width: "100%", height: 260, borderRadius: 16,
+                    background: "radial-gradient(ellipse at center, rgba(13,148,136,0.18) 0%, rgba(8,13,24,0.9) 100%)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    position: "relative", overflow: "hidden", marginBottom: "1.25rem", padding: "1rem"
+                  }}>
+                    {Boolean(itemImage(previewItem.item, listPhotos)) ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={itemImage(previewItem.item, listPhotos)}
+                        alt={previewItem.title}
+                        style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", filter: "drop-shadow(0 15px 30px rgba(0,0,0,0.8))" }}
+                      />
+                    ) : (
+                      <div style={{ color: "rgba(255,255,255,0.35)", display: "flex", flexDirection: "column", alignItems: "center", gap: "0.5rem" }}>
+                        <Camera size={32} />
+                        <span style={{ fontSize: "0.85rem" }}>No Machine Image Configured</span>
+                      </div>
+                    )}
+                    <span style={{
+                      position: "absolute", top: 12, left: 12,
+                      background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)",
+                      border: "1px solid rgba(255,255,255,0.15)", borderRadius: 20,
+                      padding: "0.25rem 0.65rem", fontSize: "0.72rem", fontWeight: 700, color: "#5eead4"
+                    }}>
+                      ⚡ {String(previewItem.item.series || previewItem.item.category || "INDUSTRIAL SERIES").toUpperCase()}
+                    </span>
+                    {Boolean(previewItem.item.badge) && (
+                      <span style={{
+                        position: "absolute", top: 12, right: 12,
+                        background: "rgba(245,196,81,0.2)", border: "1px solid rgba(245,196,81,0.5)",
+                        borderRadius: 20, padding: "0.25rem 0.65rem", fontSize: "0.72rem", fontWeight: 800, color: "#f5c451"
+                      }}>
+                        {String(previewItem.item.badge)}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Title & Tagline */}
+                  <h3 style={{ fontFamily: "var(--ff-display)", fontSize: "1.5rem", color: "#fff", margin: "0 0 0.4rem", lineHeight: 1.2 }}>
+                    {previewItem.title}
+                  </h3>
+                  {Boolean(previewItem.item.tagline) && (
+                    <p style={{ fontSize: "0.9rem", color: "var(--adm-text-sub)", margin: "0 0 1.1rem", lineHeight: 1.5 }}>
+                      {String(previewItem.item.tagline)}
+                    </p>
+                  )}
+
+                  {/* Spec Chips Grid */}
+                  {Array.isArray(previewItem.item.specs) && previewItem.item.specs.length > 0 && (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.6rem", background: "rgba(0,0,0,0.3)", padding: "1rem", borderRadius: 14, border: "1px solid rgba(255,255,255,0.06)", marginBottom: "1.25rem" }}>
+                      {(previewItem.item.specs as Array<{ label?: string; value?: string; values?: string[] }>).slice(0, 6).map((s, idx) => (
+                        <div key={idx} style={{ fontSize: "0.8rem" }}>
+                          <span style={{ color: "rgba(255,255,255,0.5)", display: "block", fontSize: "0.72rem", textTransform: "uppercase" }}>{s.label}</span>
+                          <strong style={{ color: "#fff" }}>{Array.isArray(s.values) ? s.values.join(" / ") : String(s.value || s.values || "—")}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Simulated Customer Action Bar */}
+                  <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                    <div style={{ flex: 1, padding: "0.65rem 1rem", borderRadius: 10, background: "rgba(13,148,136,0.18)", border: "1px solid rgba(13,148,136,0.4)", color: "#5eead4", fontSize: "0.85rem", fontWeight: 700, textAlign: "center" }}>
+                      Simulated CTA: Request Technical FOB Quote
+                    </div>
+                    {Boolean(previewItem.item.datasheetPdf) && (
+                      <div style={{ padding: "0.65rem 1rem", borderRadius: 10, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", color: "#fff", fontSize: "0.85rem", fontWeight: 600 }}>
+                        PDF Spec Sheet Attached
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {previewDevice === "mobile" && (
+                <div className="adm-phone-shell">
+                  <div className="adm-phone-notch" />
+                  <div style={{ padding: "1rem" }}>
+                    <div style={{
+                      background: "#121b2d", border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: 16, overflow: "hidden", padding: "0.85rem",
+                      display: "flex", flexDirection: "column", gap: "0.65rem"
+                    }}>
+                      <div style={{
+                        width: "100%", height: 140, borderRadius: 12,
+                        background: "radial-gradient(circle, rgba(13,148,136,0.15) 0%, rgba(0,0,0,0.5) 100%)",
+                        display: "flex", alignItems: "center", justifyContent: "center", padding: "0.5rem"
+                      }}>
+                        {Boolean(itemImage(previewItem.item, listPhotos)) ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={itemImage(previewItem.item, listPhotos)}
+                            alt=""
+                            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                          />
+                        ) : (
+                          <Camera size={24} color="rgba(255,255,255,0.3)" />
+                        )}
+                      </div>
+                      <div style={{ fontSize: "0.68rem", fontWeight: 700, color: "var(--brand-teal)", textTransform: "uppercase" }}>
+                        {String(previewItem.item.category || "SERIES")}
+                      </div>
+                      <h4 style={{ fontFamily: "var(--ff-display)", fontSize: "1.1rem", color: "#fff", margin: 0, lineHeight: 1.2 }}>
+                        {previewItem.title}
+                      </h4>
+                      {Boolean(previewItem.item.tagline) && (
+                        <p style={{ margin: 0, fontSize: "0.75rem", color: "rgba(255,255,255,0.6)", lineHeight: 1.3 }}>
+                          {String(previewItem.item.tagline)}
+                        </p>
+                      )}
+                      <div style={{ padding: "0.5rem", borderRadius: 8, background: "rgba(0,0,0,0.3)", fontSize: "0.72rem", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        {(previewItem.item.specs as Array<{ label?: string; value?: string }> || []).slice(0, 3).map((s, idx) => (
+                          <div key={idx} style={{ display: "flex", justifyContent: "space-between" }}>
+                            <span style={{ color: "rgba(255,255,255,0.5)" }}>{s.label}:</span>
+                            <span style={{ color: "#fff", fontWeight: 700 }}>{s.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ padding: "0.5rem", borderRadius: 8, background: "var(--adm-mint)", color: "#061814", fontWeight: 800, fontSize: "0.75rem", textAlign: "center" }}>
+                        Request Quote
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {previewDevice === "specs" && (
+                <div style={{ background: "#121b2d", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, overflow: "hidden" }}>
+                  <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.02)" }}>
+                    <h4 style={{ margin: 0, fontSize: "1.05rem", color: "#fff", fontWeight: 700 }}>
+                      Complete Technical Parameters — {previewItem.title}
+                    </h4>
+                  </div>
+                  {Array.isArray(previewItem.item.specs) && previewItem.item.specs.length > 0 ? (
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+                      <thead>
+                        <tr style={{ background: "rgba(0,0,0,0.2)", borderBottom: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.5)", textAlign: "left", fontSize: "0.75rem", textTransform: "uppercase" }}>
+                          <th style={{ padding: "0.75rem 1.25rem" }}>Parameter</th>
+                          <th style={{ padding: "0.75rem 1.25rem" }}>Engineering Value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(previewItem.item.specs as Array<{ label?: string; value?: string; values?: string[] }>).map((s, idx) => (
+                          <tr key={idx} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                            <td style={{ padding: "0.7rem 1.25rem", color: "rgba(255,255,255,0.65)" }}>{s.label}</td>
+                            <td style={{ padding: "0.7rem 1.25rem", color: "#fff", fontWeight: 700 }}>
+                              {Array.isArray(s.values) ? s.values.join(" / ") : String(s.value || s.values || "—")}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div style={{ padding: "2rem", textAlign: "center", color: "rgba(255,255,255,0.4)" }}>
+                      No technical specifications added yet.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="adm-preview-footer">
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (previewItem.item.slug) {
+                      navigator.clipboard.writeText(String(previewItem.item.slug));
+                      setPreviewCopiedSlug(true);
+                      setTimeout(() => setPreviewCopiedSlug(false), 2000);
+                    }
+                  }}
+                  className="adm-btn-pill"
+                  title="Copy Machine URL Slug"
+                >
+                  <Copy size={13} /> {previewCopiedSlug ? "Copied Slug!" : `Slug: ${previewItem.item.slug || "n/a"}`}
+                </button>
+                {Boolean(previewItem.item.slug) && (
+                  <a
+                    href={`/en/products/${previewItem.item.slug}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="adm-btn-pill"
+                    style={{ textDecoration: "none", color: "#5eead4" }}
+                  >
+                    <ExternalLink size={13} /> Public URL ↗
+                  </a>
+                )}
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <button
+                  type="button"
+                  onClick={() => setPreviewItem(null)}
+                  className="adm-btn-pill"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const it = previewItem.item;
+                    const idx = previewItem.index;
+                    const col = previewItem.collection;
+                    setPreviewItem(null);
+                    if (col !== undefined && idx !== undefined) {
+                      handleOpenEdit(it, idx, col);
+                    }
+                  }}
+                  className="adm-btn-pill adm-btn-pill--primary"
+                >
+                  Edit Machine Full Page →
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "1.25rem", flexWrap: "wrap", marginBottom: "1.75rem" }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.4rem" }}>
+            <span style={{ background: "var(--adm-mint-sub)", color: "var(--adm-mint)", padding: "0.2rem 0.6rem", borderRadius: 10, fontSize: "0.75rem", fontWeight: 700 }}>
+              {schema.slug === "products" ? "Machinery Catalogue" : "CMS Section"}
+            </span>
+            <span style={{ fontSize: "0.78rem", color: "var(--adm-text-sub)" }}>Press Ctrl+S to save</span>
+          </div>
+          <h1 style={{ fontFamily: "var(--ff-display)", fontSize: "2.4rem", color: "#fff", lineHeight: 1.05, margin: "0 0 0.5rem" }}>
+            {schema.title}
+          </h1>
+          <p style={{ fontFamily: "var(--ff-body)", fontSize: "1rem", color: "rgba(255,255,255,0.6)", maxWidth: "62ch", margin: 0, lineHeight: 1.6 }}>
+            {schema.description}
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexShrink: 0 }}>
+          {status === "dirty" && <span className="adm-status" style={{ color: "#f5c451" }}>Unsaved changes</span>}
+          {status === "saved" && <span className="adm-status" style={{ color: "var(--brand-teal)" }}><CheckCircle2 size={15} /> Saved</span>}
+          {status === "error" && <span className="adm-status" style={{ color: "#ff8a97" }}>{errMsg}</span>}
+          <button onClick={save} disabled={status === "saving"} className="adm-btn">
+            {status === "saving" && <Loader2 size={16} className="adm-spin-icon" />}
+            {status === "saving" ? "Saving…" : "Save changes (Ctrl+S)"}
+          </button>
+        </div>
+      </div>
+
+      {/* root fields */}
+      {schema.rootFields && schema.rootFields.length > 0 && (
+        <div className="adm-panel" style={{ padding: "1.5rem", marginBottom: "2rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "1.25rem" }}>
+          {schema.rootFields.map(f => (
+            <label key={f.key}>
+              <FieldLabel>{f.label}</FieldLabel>
+              <FieldControl field={f} item={data} value={data[f.key]}
+                onChange={v => mutate(d => ({ ...d, [f.key]: v }))}
+                onItemChange={(k, v) => mutate(d => ({ ...d, [k]: v }))} />
+            </label>
+          ))}
+        </div>
+      )}
+
+      {/* collections */}
+      {schema.collections.map(col => {
+        const allItems = ((data[col.key] as Item[]) ?? []);
+        const isFamilies = col.key === "families";
+        const categoryList = isFamilies
+          ? (Array.isArray(data.categories) && (data.categories as Item[]).length > 0
+              ? (data.categories as Item[])
+              : DEFAULT_PRODUCT_CATEGORIES)
+          : [];
+
+        const isAllSelected = isFamilies && activeCategory === "all";
+
+        const visibleIndices = isFamilies && activeCategory && !isAllSelected
+          ? allItems.reduce<number[]>((acc, it, idx) => { if (it.category === activeCategory) acc.push(idx); return acc; }, [])
+          : allItems.map((_, idx) => idx);
+
+        let itemsWithIndices = visibleIndices.map(idx => ({ item: allItems[idx], index: idx }));
+
+        // Filter items dynamically by search query & filter chips
+        if (filterQuery.trim()) {
+          const q = filterQuery.toLowerCase();
+          itemsWithIndices = itemsWithIndices.filter(({ item }) => {
+            const title = col.titleKeys.map(k => String(item[k] ?? "")).join(" ").toLowerCase();
+            return title.includes(q) || String(item.series ?? "").toLowerCase().includes(q) || String(item.name ?? "").toLowerCase().includes(q);
+          });
+        }
+
+        if (filterType === "has_image") {
+          itemsWithIndices = itemsWithIndices.filter(({ item }) => Boolean(itemImage(item, listPhotos)));
+        } else if (filterType === "warnings") {
+          itemsWithIndices = itemsWithIndices.filter(({ item }) => isFamilies ? validateFamily(item).length > 0 : false);
+        }
+
+        const activeCatObj = categoryList.find(c => c.slug === activeCategory);
+        const activeCategoryName = isFamilies
+          ? (isAllSelected ? "All Machines & Products" : String(activeCatObj?.name ?? activeCategory))
+          : col.label;
+
+        const activeCategoryTagline = isFamilies
+          ? (isAllSelected
+              ? "Complete machinery catalogue across all manufacturing lines"
+              : String(activeCatObj?.tagline || (activeCategory === "film-blowing" ? "Pellet to film · Blown film lines & co-extrusion towers" : activeCategory === "bag-making" ? "Film to bag · Heat-seal, roll-bag & pouch converters" : activeCategory === "recycling" ? "Scrap to pellet · Pelletizing & closed-loop resin lines" : activeCategory === "printing" ? "Film to print · CI flexographic printing presses" : "")))
+          : "";
+
+        const ActiveIcon = isFamilies
+          ? (isAllSelected ? Package : (SHARED_CATEGORY_ICON[activeCategory] ?? Package))
+          : Package;
+
+        return (
+          <section key={col.key} style={{ marginBottom: "2.5rem" }}>
+            {/* If families: ALWAYS render Distinct Category Cards prominently at the top */}
+            {isFamilies && (
+              <div style={{ marginBottom: "1.75rem" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.85rem" }}>
+                  <div>
+                    <h2 style={{ fontFamily: "var(--ff-display)", fontSize: "1.25rem", color: "#fff", margin: 0 }}>
+                      Machinery Categories
+                    </h2>
+                    <p style={{ margin: "0.2rem 0 0", fontSize: "0.82rem", color: "var(--adm-text-sub)" }}>
+                      Click any category card to render its products below.
+                    </p>
+                  </div>
+                  <span style={{ fontFamily: "var(--ff-mono)", fontSize: "0.78rem", color: "rgba(255,255,255,0.4)" }}>
+                    {allItems.length} machines total
+                  </span>
+                </div>
+                <DistinctCategoryCards
+                  categories={categoryList}
+                  items={allItems}
+                  activeCategory={activeCategory}
+                  onSelect={handleSelectCategory}
+                />
+              </div>
+            )}
+
+            {/* Collection Header & Filter Toolbar for products rendered at bottom */}
+            <div style={{ background: "#121b2d", border: "1px solid var(--adm-border)", borderRadius: 16, padding: "1.25rem 1.5rem", marginBottom: "1.25rem" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                    <span style={{ color: "var(--brand-teal)", display: "flex", alignItems: "center" }}>
+                      <ActiveIcon size={20} />
+                    </span>
+                    <h2 style={{ fontFamily: "var(--ff-display)", fontSize: "1.35rem", color: "#fff", margin: 0 }}>
+                      {activeCategoryName}
+                    </h2>
+                    <span style={{
+                      background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.8)",
+                      fontFamily: "var(--ff-mono)", fontSize: "0.78rem", padding: "0.2rem 0.55rem",
+                      borderRadius: 20, fontWeight: 700, border: "1px solid rgba(255,255,255,0.08)"
+                    }}>
+                      {itemsWithIndices.length} {itemsWithIndices.length === 1 ? "machine" : "machines"}
+                    </span>
+                  </div>
+                  {activeCategoryTagline && (
+                    <p style={{ margin: "0.3rem 0 0", fontSize: "0.82rem", color: "var(--adm-text-sub)" }}>
+                      {activeCategoryTagline}
+                    </p>
+                  )}
+                </div>
+
+                {col.canAdd && (
+                  <button
+                    type="button"
+                    className="adm-btn"
+                    style={{ padding: "0.55rem 1.15rem", fontSize: "0.82rem" }}
+                    onClick={() => {
+                      const template = JSON.parse(JSON.stringify(col.template ?? {}));
+                      if (isFamilies && activeCategory && activeCategory !== "all") {
+                        template.category = activeCategory;
+                      } else if (isFamilies) {
+                        template.category = "film-blowing";
+                      }
+                      template.isNew = true;
+                      mutate(d => {
+                        const newItems = [template, ...allItems];
+                        setTimeout(() => handleOpenEdit(template, 0, col), 50);
+                        return { ...d, [col.key]: newItems };
+                      });
+                    }}
+                  >
+                    + Add {isFamilies && activeCategory !== "all" ? `${activeCategoryName.replace(/ Machines$/, "").replace(/ & Lab Lines$/, "")} Machine` : (col.singular ?? col.label.replace(/s$/, "")).toLowerCase()}
+                  </button>
+                )}
+              </div>
+
+              {/* Dynamic Filter Controls */}
+              <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ position: "relative", flex: 1, minWidth: 200 }}>
+                  <Search size={14} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--adm-text-sub)" }} />
+                  <input
+                    type="text"
+                    placeholder={`Filter ${activeCategoryName.toLowerCase()}...`}
+                    value={filterQuery}
+                    onChange={e => setFilterQuery(e.target.value)}
+                    style={{
+                      width: "100%", padding: "0.5rem 0.8rem 0.5rem 2.2rem",
+                      background: "#162338", border: "1px solid var(--adm-border)",
+                      borderRadius: 10, color: "#fff", fontSize: "0.82rem", outline: "none"
+                    }}
+                  />
+                  {filterQuery && (
+                    <button onClick={() => setFilterQuery("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "rgba(255,255,255,0.4)", cursor: "pointer" }}>
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: "0.35rem" }}>
+                  {(["all", "has_image", "warnings"] as const).map(t => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setFilterType(t)}
+                      style={{
+                        padding: "0.45rem 0.75rem", borderRadius: 8, fontSize: "0.75rem", fontWeight: 600,
+                        border: "1px solid var(--adm-border)", cursor: "pointer",
+                        background: filterType === t ? "var(--adm-mint)" : "rgba(255,255,255,0.04)",
+                        color: filterType === t ? "#061814" : "var(--adm-text-sub)"
+                      }}
+                    >
+                      {t === "all" ? "All Items" : t === "has_image" ? "📷 Has Image" : "⚠️ Needs Review"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* List Cards Rendered Nicely at Bottom */}
+            {itemsWithIndices.length === 0 ? (
+              <div style={{
+                background: "#121b2d", border: "1px dashed var(--adm-border)",
+                borderRadius: 16, padding: "3rem 1.5rem", textAlign: "center",
+                display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem"
+              }}>
+                <div style={{ width: 48, height: 48, borderRadius: 12, background: "rgba(255,255,255,0.04)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--adm-text-sub)" }}>
+                  <Package size={24} />
+                </div>
+                <h3 style={{ margin: 0, fontSize: "1.1rem", color: "#fff" }}>
+                  No machines found
+                </h3>
+                <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--adm-text-sub)", maxWidth: 360 }}>
+                  {filterQuery ? `No machines matching "${filterQuery}" in this category.` : `There are no machines listed under ${activeCategoryName} yet.`}
+                </p>
+                {col.canAdd && (
+                  <button
+                    type="button"
+                    className="adm-btn"
+                    style={{ marginTop: "0.5rem", padding: "0.5rem 1rem", fontSize: "0.82rem" }}
+                    onClick={() => {
+                      const template = JSON.parse(JSON.stringify(col.template ?? {}));
+                      if (isFamilies && activeCategory && activeCategory !== "all") {
+                        template.category = activeCategory;
+                      }
+                      template.isNew = true;
+                      mutate(d => {
+                        const newItems = [template, ...allItems];
+                        setTimeout(() => handleOpenEdit(template, 0, col), 50);
+                        return { ...d, [col.key]: newItems };
+                      });
+                    }}
+                  >
+                    + Add first machine to this category
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                {itemsWithIndices.map(({ item, index: i }, listI) => {
+                  const title = col.titleKeys.map(k => String(item[k] ?? "")).filter(Boolean).join(" — ") || `#${listI + 1}`;
+                  const itemWarnings = isFamilies ? validateFamily(item) : [];
+                  const hasErrors = itemWarnings.some(w => w.severity === "error");
+                  const hasWarnings = itemWarnings.some(w => w.severity === "warning");
+                  const itemImg = itemImage(item, listPhotos);
+                  const specCount = Array.isArray(item.specs) ? item.specs.length : 0;
+                  const photoCount = Array.isArray(item.images) ? item.images.length : (itemImg ? 1 : 0);
+                  const itemCat = String(item.category || "");
+
+                  return (
+                    <div key={i} className="adm-panel" style={{
+                      borderRadius: 16,
+                      background: "#121b2d",
+                      overflow: "hidden",
+                      border: "1px solid",
+                      transition: "all 0.2s ease",
+                      borderColor: hasErrors ? "rgba(255,107,125,0.35)" : hasWarnings ? "rgba(245,196,81,0.3)" : "var(--adm-border)",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "1rem", padding: "0.9rem 1.25rem", flexWrap: "wrap" }}>
+                        {/* Thumbnail or Badge */}
+                        <div style={{
+                          width: 52, height: 52, borderRadius: 12, flexShrink: 0,
+                          background: itemImg ? "rgba(0,0,0,0.3)" : "rgba(0,210,148,0.1)",
+                          border: "1px solid rgba(255,255,255,0.1)",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          overflow: "hidden"
+                        }}>
+                          {itemImg ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={itemImg} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          ) : (
+                            <span style={{ color: "var(--adm-mint)", fontWeight: 700, fontSize: "0.9rem" }}>
+                              {listI + 1}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Title & Badges Info */}
+                        <div style={{ flex: 1, minWidth: 220 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                            <h4 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 700, color: "#fff" }}>
+                              {title}
+                            </h4>
+                            {isAllSelected && itemCat && (
+                              <span style={{
+                                fontSize: "0.7rem", fontFamily: "var(--ff-mono)",
+                                background: "rgba(43,191,179,0.15)", color: "#5eead4",
+                                padding: "0.15rem 0.5rem", borderRadius: 6, border: "1px solid rgba(43,191,179,0.3)"
+                              }}>
+                                {itemCat}
+                              </span>
+                            )}
+                            {hasErrors && <span title="Has errors"><AlertTriangle size={14} color="#ff8a97" /></span>}
+                            {hasWarnings && !hasErrors && <span title="Has warnings"><AlertTriangle size={14} color="#f5c451" /></span>}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginTop: "0.35rem", fontSize: "0.78rem", color: "var(--adm-text-sub)", flexWrap: "wrap" }}>
+                            {specCount > 0 && <span>⚡ {specCount} Specs</span>}
+                            {photoCount > 0 && <span>📷 {photoCount} Photos</span>}
+                            {Boolean(item.datasheetPdf) && <span style={{ color: "var(--adm-mint)" }}>📄 PDF Datasheet</span>}
+                            {Boolean(item.series) && <span style={{ background: "rgba(255,255,255,0.06)", padding: "0.1rem 0.4rem", borderRadius: 6 }}>{String(item.series)}</span>}
+                          </div>
+                        </div>
+
+                        {/* Actions: Reorder, Preview, Clone, Edit, and Delete */}
+                        <div className="adm-item-action-bar">
+                          {i > 0 && (
+                            <button
+                              type="button"
+                              title="Move Up in Catalogue"
+                              className="adm-btn-pill"
+                              style={{ padding: "0.45rem 0.55rem" }}
+                              onClick={() => {
+                                mutate(d => {
+                                  const n = [...allItems];
+                                  const temp = n[i];
+                                  n[i] = n[i - 1];
+                                  n[i - 1] = temp;
+                                  return { ...d, [col.key]: n };
+                                });
+                              }}
+                            >
+                              <ArrowUp size={13} />
+                            </button>
+                          )}
+                          {i < allItems.length - 1 && (
+                            <button
+                              type="button"
+                              title="Move Down in Catalogue"
+                              className="adm-btn-pill"
+                              style={{ padding: "0.45rem 0.55rem" }}
+                              onClick={() => {
+                                mutate(d => {
+                                  const n = [...allItems];
+                                  const temp = n[i];
+                                  n[i] = n[i + 1];
+                                  n[i + 1] = temp;
+                                  return { ...d, [col.key]: n };
+                                });
+                              }}
+                            >
+                              <ArrowDown size={13} />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            title="Live Card Preview (Desktop & Mobile)"
+                            className="adm-btn-pill"
+                            onClick={() => setPreviewItem({ item, title, index: i, collection: col })}
+                          >
+                            <Eye size={13} /> Preview
+                          </button>
+                          <button
+                            type="button"
+                            title="Clone Machine Record"
+                            className="adm-btn-pill"
+                            onClick={() => {
+                              const clone = JSON.parse(JSON.stringify(item));
+                              if (clone.name) clone.name = `${clone.name} (Copy)`;
+                              mutate(d => ({ ...d, [col.key]: [...allItems, clone] }));
+                            }}
+                          >
+                            <Copy size={13} /> Clone
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(item, i, col)}
+                            className="adm-btn-pill adm-btn-pill--primary"
+                          >
+                            Edit Page →
+                          </button>
+                          {col.canAdd && (
+                            <button
+                              type="button"
+                              title="Delete Machine Record"
+                              className="adm-btn-pill adm-btn-pill--danger"
+                              onClick={() => { if (confirm('Delete "' + title + '"?')) mutate(d => ({ ...d, [col.key]: allItems.filter((_, j) => j !== i) })); }}
+                            >
+                              <Trash2 size={13} /> Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        );
+      })}
+
+      {/* Floating Bottom Sticky Bar when unsaved */}
+      {status === "dirty" && (
+        <div style={{
+          position: "fixed", bottom: 28, left: "50%", transform: "translateX(-50%)", zIndex: 9000,
+          background: "rgba(18, 27, 45, 0.94)", backdropFilter: "blur(16px)",
+          border: "1px solid var(--adm-mint)",
+          borderRadius: 40, padding: "0.6rem 1.6rem",
+          boxShadow: "0 12px 35px rgba(0,210,148,0.35), 0 20px 50px rgba(0,0,0,0.8)",
+          display: "flex", alignItems: "center", gap: "1.25rem",
+          animation: "admRise 0.3s ease"
+        }}>
+          <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#fff", display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#f5c451", boxShadow: "0 0 10px #f5c451" }} />
+            <span>Unsaved Changes in <strong>{schema.title}</strong></span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <button
+              onClick={() => {
+                if (confirm("Discard all unsaved changes and reload original data?")) {
+                  window.location.reload();
+                }
+              }}
+              className="adm-btn-pill"
+              style={{ background: "rgba(255,255,255,0.06)", borderColor: "rgba(255,255,255,0.15)" }}
+            >
+              Discard
+            </button>
+            <button
+              onClick={save}
+              className="adm-btn"
+              style={{ padding: "0.45rem 1.25rem", fontSize: "0.82rem" }}
+            >
+              Save Now (Ctrl+S)
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
